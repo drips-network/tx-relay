@@ -1,16 +1,27 @@
 import { Application, Router } from "oak";
 import { z } from "zod";
-import { createWalletClient, getContract, Hex, http, isHex, parseAbi } from "viem";
+import {
+  createWalletClient,
+  getContract,
+  GetContractReturnType,
+  Hex,
+  http,
+  isHex,
+  parseAbi,
+  WalletClient,
+} from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import * as viemChains from "viem/chains";
 
 // Resolve duplicate chains by keeping the version under the lexically first key, e.g. suffix-free.
-const chains = Object.keys(viemChains).sort()
-    .map((key) => viemChains[key as keyof typeof viemChains])
-    .reduce((chains, chain) => ({[chain.id]: chain, ...chains}), {});
+const chains: Record<number, (typeof viemChains)[keyof typeof viemChains]> = Object.keys(viemChains)
+  .sort()
+  .map((key) => viemChains[key as keyof typeof viemChains])
+  .reduce((chains, chain) => ({ [chain.id]: chain, ...chains }), {});
+
+const port = z.coerce.number().default(8000).parse(Deno.env.get("PORT"));
 
 const configSchema = z.object({
-  port: z.number().default(8000),
   rpcs: z.array(z.object({
     chainId: z.number(),
     url: z.url(),
@@ -34,11 +45,7 @@ const multicall3Abi = parseAbi([
   "struct Result { bool success; bytes returnData; }",
   "function aggregate3(Call3[] calls) payable returns (Result[] returnData)",
 ]);
-type Multicall3 = ReturnType<
-  typeof getContract<typeof multicall3Abi, ReturnType<typeof createWalletClient>>
->;
-
-const multicall3s: Record<number, Multicall3> = {};
+const multicall3s: Record<number, GetContractReturnType<typeof multicall3Abi, WalletClient>> = {};
 for (const wallet of config.wallets) {
   const account = privateKeyToAccount(wallet.privateKey as Hex);
   for (const chainId of wallet.chainIds) {
@@ -102,4 +109,4 @@ router
 await new Application()
   .use(router.routes())
   .use(router.allowedMethods())
-  .listen({ port: config.port });
+  .listen({ port, hostname: "[::]" });
