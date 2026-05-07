@@ -1,66 +1,10 @@
 import { Application, Router } from "oak";
 import { z } from "zod";
-import {
-  createWalletClient,
-  getContract,
-  GetContractReturnType,
-  Hex,
-  http,
-  isHex,
-  parseAbi,
-  WalletClient,
-} from "viem";
-import { privateKeyToAccount } from "viem/accounts";
-import * as viemChains from "viem/chains";
+import { Hex, isHex } from "viem";
 
-// Resolve duplicate chains by keeping the version under the lexically first key, e.g. suffix-free.
-const chains: Record<number, (typeof viemChains)[keyof typeof viemChains]> = Object.keys(viemChains)
-  .sort()
-  .map((key) => viemChains[key as keyof typeof viemChains])
-  .reduce((chains, chain) => ({ [chain.id]: chain, ...chains }), {});
+import { getMulticall3s, getPort } from "./config.ts";
 
-const port = z.coerce.number().default(8000).parse(Deno.env.get("PORT"));
-
-const configSchema = z.object({
-  rpcs: z.array(z.object({
-    chainId: z.number(),
-    url: z.url(),
-  })).default([]),
-  wallets: z.array(z.object({
-    chainIds: z.array(z.number()),
-    privateKey: z.string(),
-  })).default([]),
-});
-const config = configSchema.parse(JSON.parse(Deno.env.get("CONFIG") ?? "{}"));
-
-const rpcUrls: Record<number, string> = {};
-for (const { chainId, url } of config.rpcs) {
-  if (!chains[chainId]) throw new Error("Unknown RPC chain ID " + chainId);
-  if (rpcUrls[chainId]) throw new Error("Duplicate RPCs for chain ID " + chainId);
-  rpcUrls[chainId] = url;
-}
-
-const multicall3Abi = parseAbi([
-  "struct Call3 { address target; bool allowFailure; bytes callData; }",
-  "struct Result { bool success; bytes returnData; }",
-  "function aggregate3(Call3[] calls) payable returns (Result[] returnData)",
-]);
-const multicall3s: Record<number, GetContractReturnType<typeof multicall3Abi, WalletClient>> = {};
-for (const wallet of config.wallets) {
-  const account = privateKeyToAccount(wallet.privateKey as Hex);
-  for (const chainId of wallet.chainIds) {
-    const chain = chains[chainId];
-    if (!chain) throw new Error("Unknown wallet chain ID " + chainId);
-
-    const address = chain.contracts?.multicall3?.address;
-    if (!address) throw new Error("No multicall3 for chain ID " + chainId);
-
-    const client = createWalletClient({ account, chain, transport: http(rpcUrls[chainId]) });
-
-    if (multicall3s[chainId]) throw new Error("Duplicate wallets for chain ID " + chainId);
-    multicall3s[chainId] = getContract({ address, client, abi: multicall3Abi });
-  }
-}
+const multicall3s = getMulticall3s();
 
 const sendSchema = z.object({
   calls: z.array(z.object({
@@ -109,4 +53,4 @@ router
 await new Application()
   .use(router.routes())
   .use(router.allowedMethods())
-  .listen({ port, hostname: "[::]" });
+  .listen({ port: getPort(), hostname: "[::]" });
