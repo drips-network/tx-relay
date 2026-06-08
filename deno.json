@@ -1,10 +1,14 @@
 {
   "tasks": {
-    "start": "deno run --allow-net --allow-env --env-file main.ts"
+    "start": "deno run --allow-net --allow-sys=uid,gid,userInfo --allow-env --env-file src/main.ts",
+    "drizzle-kit": "deno run --allow-net --allow-sys=homedir --allow-env --env-file --allow-read npm:drizzle-kit"
   },
   "imports": {
+    "drizzle-kit": "npm:drizzle-kit@^0.31.10",
+    "drizzle-orm": "npm:drizzle-orm@^0.45.2",
     "oak": "jsr:@oak/oak@^17.2.0",
     "assert": "jsr:@std/assert@1",
+    "postgres": "npm:postgres@^3.4.9",
     "viem": "jsr:@wevm/viem@^2.48.1",
     "zod": "jsr:@zod/zod@^4.3.6"
   },

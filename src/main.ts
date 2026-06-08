@@ -2,7 +2,24 @@ import { Application, Router } from "oak";
 import { z } from "zod";
 import { Hex, isHex } from "viem";
 
-import { getMulticall3s, getPort } from "./config.ts";
+//------------------------------------------------
+//
+import { drizzle } from "drizzle-orm/postgres-js";
+import {usersTable} from "./db/schema.ts";
+import { getMulticall3s, getPort, getDbUrl } from "./config.ts";
+
+// const db = drizzle({connection: getDbUrl(), casing: "snake_case"});
+// const user: typeof usersTable.$inferInsert = {
+//   name: "Bobby",
+//   age: 120,
+//   email: "bobby@bob.coM",
+// };
+// await db.insert(usersTable).values(user);
+
+// const users = await db.select().from(usersTable);
+// console.log("USERS", users);
+
+// db.query.
 
 const multicall3s = getMulticall3s();
 

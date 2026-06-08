@@ -11,6 +11,15 @@ import {
 import { privateKeyToAccount } from "viem/accounts";
 import * as viemChains from "viem/chains";
 
+// DB URL configuration
+
+export function getDbUrl(): string {
+  return dbUrl ??= z.url().default("postgres://user:password@localhost:5432/relay_db")
+    .parse(Deno.env.get("DB_URL"));
+}
+
+let dbUrl: string | undefined;
+
 // Port number configuration
 
 export function getPort(): number {
