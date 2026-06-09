@@ -1,4 +1,5 @@
 {
+  "license": "GPL-3.0-only",
   "tasks": {
     "start": "deno run --allow-net --allow-sys=uid,gid,userInfo --allow-env --env-file src/main.ts",
     "drizzle-kit": "deno run --allow-net --allow-sys=homedir --allow-env --env-file --allow-read npm:drizzle-kit"
