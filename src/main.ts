@@ -1,12 +1,12 @@
 import { Application, Router } from "oak";
 import { z } from "zod";
-import { Hex, isHex } from "viem";
+import { concat, getContractAddress, Hex, isHex, pad } from "viem";
 
 //------------------------------------------------
 //
 import { drizzle } from "drizzle-orm/postgres-js";
-import {usersTable} from "./db/schema.ts";
-import { getMulticall3s, getPort, getDbUrl } from "./config.ts";
+import { usersTable } from "./db/schema.ts";
+import { getDbUrl, getMulticall3s, getPort, getWallets } from "./config.ts";
 
 // const db = drizzle({connection: getDbUrl(), casing: "snake_case"});
 // const user: typeof usersTable.$inferInsert = {
@@ -20,6 +20,30 @@ import { getMulticall3s, getPort, getDbUrl } from "./config.ts";
 // console.log("USERS", users);
 
 // db.query.
+
+import batcherOutputJson from "./Batcher.generated.json" with { type: "json" };
+const { abi: batcherAbi, bytecode: { object: batcherBytecode } } = batcherOutputJson;
+
+const wallets = getWallets();
+
+const create2Factory = "0x914d7Fec6aaC8cd542e72Bca78B30650d45643d7";
+const batcherSalt = pad("0x00");
+const batcherAddr = getContractAddress({
+  from: create2Factory,
+  opcode: "CREATE2",
+  bytecode: batcherBytecode,
+  salt: batcherSalt,
+});
+
+for (const wallet of Object.values(wallets)) {
+  if(await wallet.getCode({ address: batcherAddr })) continue;
+  console.log("Deploying Batcher for chain", wallet.chain.name);
+  const txHash = await wallet.sendTransaction({
+    to: create2Factory,
+    data: concat([batcherSalt, batcherBytecode]),
+  });
+  console.log("TX hash", txHash);
+}
 
 const multicall3s = getMulticall3s();
 

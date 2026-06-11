@@ -6,6 +6,8 @@ import {
   Hex,
   http,
   parseAbi,
+  publicActions,
+  PublicClient,
   WalletClient,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
@@ -44,7 +46,10 @@ const configSchema = z.object({
     url: z.url(),
   })).default([]),
   wallets: z.array(z.object({
-    chainIds: z.array(z.number()),
+    chains: z.array(z.object({
+      chainId: z.number(),
+      confirmations: z.number().default(1)
+    })),
     privateKey: z.string(),
   })).default([]),
 });
@@ -74,7 +79,6 @@ function getRpcUrls(): RpcUrls {
 let rpcUrls: RpcUrls | undefined;
 
 function getRpcUrlsValue(): RpcUrls {
-  // Resolve duplicate chains by keeping the version under the lexically first key, e.g. suffix-free.
   const chains = getChains();
   const rpcUrls: RpcUrls = {};
   for (const { chainId, url } of getConfig().rpcs) {
@@ -83,6 +87,34 @@ function getRpcUrlsValue(): RpcUrls {
     rpcUrls[chainId] = url;
   }
   return rpcUrls;
+}
+
+// Wallets configuration
+
+export type Wallets = Record<number, WalletClient & PublicClient & { confirmations: number }>;
+
+export function getWallets(): Wallets {
+  return wallets ??= getWalletsValue();
+}
+
+let wallets: Wallets | undefined;
+
+function getWalletsValue(): Wallets {
+  const chains = getChains();
+  const rpcUrls = getRpcUrls();
+  const wallets: Wallets = {};
+  for (const wallet of getConfig().wallets) {
+    const account = privateKeyToAccount(wallet.privateKey as Hex);
+    for (const {chainId, confirmations} of wallet.chains) {
+      const chain = chains[chainId];
+      if (!chain) throw new Error("Unknown wallet chain ID " + chainId);
+      if (wallets[chainId]) throw new Error("Duplicate wallets for chain ID " + chainId);
+      wallets[chainId] = createWalletClient({ account, chain, transport: http(rpcUrls[chainId]) })
+        .extend(publicActions)
+        .extend(() => ({confirmations}));
+    }
+  }
+  return wallets;
 }
 
 // Mutlicall3 wallets configuration
