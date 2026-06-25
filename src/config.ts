@@ -140,7 +140,7 @@ function getMulticall3sValue(): Multicall3s {
   const multicall3s: Multicall3s = {};
   for (const wallet of getConfig().wallets) {
     const account = privateKeyToAccount(wallet.privateKey as Hex);
-    for (const chainId of wallet.chainIds) {
+    for (const {chainId} of wallet.chains) {
       const chain = chains[chainId];
       if (!chain) throw new Error("Unknown wallet chain ID " + chainId);
 

@@ -45,6 +45,32 @@ for (const wallet of Object.values(wallets)) {
   console.log("TX hash", txHash);
 }
 
+// RPC fail - retry
+// submitted / confirming (both success/revert) - wait
+// submitted, never mined - send same again, same nonce?
+// dropped, RPC doesn't know WDYM - send same again, same nonce? (what if 2 RPCs get the same thing? Same nonce too, pleasant race condition)
+// after X retries - consider failure, THEN WHAT? burn the nonce?
+//
+// put a TX hash in the DB BEFORE sending it
+// on startup, check TXs in db that are in-flight, restore observation
+//
+// loop(3 times?){
+//    estimate
+//    if(not enough funds): break;
+//    sign & submit
+//    burn_nonce = true
+//    if(mined): wait for confirmations
+//    if(mined, revert): wait for confirmations, failed
+//    if(unmined): continue loop
+//
+//    wait for mined one way or another
+//
+// }
+// if(burn_nonce) send_tx(nonce_burner)
+//
+//
+// in all RPC calls, do the retrials
+
 const multicall3s = getMulticall3s();
 
 const sendSchema = z.object({
