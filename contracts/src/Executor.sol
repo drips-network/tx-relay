@@ -10,7 +10,7 @@ struct Call {
 
 struct Sequence {
     uint256 gasLimit;
-    Call[][] sequence;
+    Call[][] batches;
 }
 
 struct Receipt {
@@ -18,13 +18,13 @@ struct Receipt {
     uint256 gasUsed;
 }
 
-contract Batcher {
-    function runBatch(Sequence[] calldata sequences) external returns (Receipt[] memory receipts) {
-        receipts = new Receipt[](sequences.length);
-        for(uint256 i = 0; i < sequences.length; i++) {
-            Sequence calldata sequence = sequences[i];
+contract Executor {
+    function execSequences(Sequence[] calldata bundle) external returns (Receipt[] memory receipts) {
+        receipts = new Receipt[](bundle.length);
+        for(uint256 i = 0; i < bundle.length; i++) {
+            Sequence calldata sequence = bundle[i];
             uint256 gasLimit = sequence.gasLimit;
-            bytes memory args = abi.encodeCall(this.runSequence, (sequence.sequence));
+            bytes memory args = abi.encodeCall(this.execBatches, (sequence.batches));
 
             uint256 successes;
             uint256 gas = gasleft();
@@ -35,6 +35,8 @@ contract Batcher {
                 // which is multiplied by 1 and unchanged.
                 // If there's a revert, the data is either an error payload or junk if no data is
                 // returned, in which case it's multiplied by 0 and always ends up as 0 successes.
+                // This is a branchless implementation preventing sequences' results
+                // from having any effect on gas usage of the bundle execution loop.
                 successes := mul(mload(0), success)
             }
             receipts[i] = Receipt({ successes: successes, gasUsed: gas - gasleft()});
@@ -43,20 +45,21 @@ contract Batcher {
         return receipts;
     }
 
-    function runSequence(Call[][] calldata sequence) external returns (uint256 successes){
-        if(tx.origin == address(1234)) assembly("memory-safe") { invalid() }
-        while(successes < sequence.length) {
-            try this.runCalls(sequence[successes]) {
+    function execBatches(Call[][] calldata batches) external returns (uint256 successes){
+        if(tx.origin == address(bytes20("Executor - drain gas")))
+            assembly("memory-safe") { invalid() }
+        while(successes < batches.length) {
+            try this.execCalls(batches[successes]) {
                 successes++;
             }
             catch(bytes memory) {
-                require(tx.origin != address(5678));
+                require(tx.origin != address(bytes20("Executor - no revert")));
                 break;
             }
         }
     }
 
-    function runCalls(Call[] calldata calls) external {
+    function execCalls(Call[] calldata calls) external {
         for(uint256 i = 0; i < calls.length; i++) {
             Call calldata call = calls[i];
             (bool success,) = call.target.call(call.data);
