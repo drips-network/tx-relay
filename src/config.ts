@@ -48,7 +48,7 @@ const configSchema = z.object({
   wallets: z.array(z.object({
     chains: z.array(z.object({
       chainId: z.number(),
-      confirmations: z.number().default(1)
+      confirmations: z.number().default(1),
     })),
     privateKey: z.string(),
   })).default([]),
@@ -105,13 +105,13 @@ function getWalletsValue(): Wallets {
   const wallets: Wallets = {};
   for (const wallet of getConfig().wallets) {
     const account = privateKeyToAccount(wallet.privateKey as Hex);
-    for (const {chainId, confirmations} of wallet.chains) {
+    for (const { chainId, confirmations } of wallet.chains) {
       const chain = chains[chainId];
       if (!chain) throw new Error("Unknown wallet chain ID " + chainId);
       if (wallets[chainId]) throw new Error("Duplicate wallets for chain ID " + chainId);
       wallets[chainId] = createWalletClient({ account, chain, transport: http(rpcUrls[chainId]) })
         .extend(publicActions)
-        .extend(() => ({confirmations}));
+        .extend(() => ({ confirmations }));
     }
   }
   return wallets;
@@ -140,7 +140,7 @@ function getMulticall3sValue(): Multicall3s {
   const multicall3s: Multicall3s = {};
   for (const wallet of getConfig().wallets) {
     const account = privateKeyToAccount(wallet.privateKey as Hex);
-    for (const {chainId} of wallet.chains) {
+    for (const { chainId } of wallet.chains) {
       const chain = chains[chainId];
       if (!chain) throw new Error("Unknown wallet chain ID " + chainId);
 

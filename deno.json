@@ -1,9 +1,10 @@
 {
   "license": "GPL-3.0-only",
   "tasks": {
-    "start": "deno run --allow-net --allow-sys=uid,gid,userInfo --allow-env --env-file src/main.ts",
-    "drizzle-kit": "deno run --allow-net --allow-sys=homedir --allow-env --env-file --allow-read npm:drizzle-kit",
+    "start": "deno run --allow-read=drizzle --allow-net --allow-sys=uid,gid,userInfo --allow-env --env-file src/main.ts",
     "contract-codegen": "forge build --root contracts && cp contracts/out/Executor.sol/Executor.json src/Executor.generated.json",
+    "drizzle-kit": "deno run --allow-write=drizzle --allow-net --allow-sys=homedir --allow-env --env-file --allow-read npm:drizzle-kit",
+    "drizzle-generate": "deno task drizzle-kit generate",
 
     "contracts": "cd contracts && "
   },
