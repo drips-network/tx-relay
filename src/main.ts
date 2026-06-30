@@ -1,9 +1,10 @@
-import { Application, Router } from "oak";
+import { Application, Context, Router } from "oak";
 import { z } from "zod";
 import { concat, getContractAddress, Hex, hexToBytes, isAddress, isHex, pad } from "viem";
 
 //------------------------------------------------
 //
+import { inArray, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 // import { usersTable } from "./db/schema.ts";
@@ -83,7 +84,7 @@ const sendSchema = z.object({
   })).nonempty(),
 });
 
-const sendSchema2 = z.object({
+const sendSequencesArgSchema = z.object({
   sequences: z.array(z.object({
     chainId: z.number().refine((chainId) => wallets[chainId], "Unsupported chain ID"),
     batches: z.array(z.object({
@@ -95,22 +96,34 @@ const sendSchema2 = z.object({
   })).nonempty(),
 });
 
+const sequencesStatesArgSchema = z.object({
+  sequences: z.array(z.object({
+    id: z.uuid(),
+  })).nonempty(),
+});
+
+async function parseJsonArg<S extends z.ZodTypeAny>(
+  context: Context,
+  schema: S,
+): z.infer<S> | undefined {
+  try {
+    return schema.parse(await context.request.body.json());
+  } catch (error) {
+    context.response.status = 400;
+    context.response.body = error instanceof z.ZodError
+      ? error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("\n")
+      : String(error);
+  }
+}
+
 const router = new Router();
 router
-  .post("/send", async (context) => {
-    let sendArg: z.infer<typeof sendSchema2>;
-    try {
-      sendArg = sendSchema2.parse(await context.request.body.json());
-    } catch (error) {
-      context.response.status = 400;
-      context.response.body = error instanceof z.ZodError
-        ? error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("\n")
-        : String(error);
-      return;
-    }
+  .post("/send-sequences", async (context) => {
+    let arg = await parseJsonArg(context, sendSequencesArgSchema);
+    if (arg === undefined) return;
     const sequences = [];
     await db.transaction(async (tx) => {
-      for (const { chainId, batches } of sendArg.sequences) {
+      for (const { chainId, batches } of arg.sequences) {
         const [{ sequenceId }] = await tx.insert(sequencesTable)
           .values({ chainId })
           .returning({ sequenceId: sequencesTable.id });
@@ -127,6 +140,43 @@ router
             })));
         }
       }
+    });
+    context.response.body = { sequences };
+  })
+  .post("/sequences-states", async (context) => {
+    let arg = await parseJsonArg(context, sequencesStatesArgSchema);
+    if (arg === undefined) return;
+    const sequenceIds = arg.sequences.map(({ id }) => id);
+    const states = await db.select({
+      sequenceId: batchesTable.sequenceId,
+      pending: sql<number>`count(*) filter (where ${batchesTable.state} = 'pending')::int`,
+      successes: sql<number>`count(*) filter (where ${batchesTable.state} = 'success')::int`,
+      failures: sql<number>`count(*) filter (where ${batchesTable.state} = 'failure')::int`,
+    })
+      .from(batchesTable)
+      .where(inArray(batchesTable.sequenceId, sequenceIds))
+      .groupBy(batchesTable.sequenceId);
+    const statesById = Object.fromEntries(states.map((state) => [state.sequenceId, state]));
+
+    console.log({
+      sequences: sequenceIds.map((id) => {
+        const state = statesById[id];
+        return {
+          id,
+          total: state.pending + state.successes + state.failures,
+          successes: state.successes,
+          isFailed: state.failures > 0,
+        };
+      }),
+    });
+    const sequences = sequenceIds.map((id) => {
+      const state = statesById[id];
+      return {
+        id,
+        total: state.pending + state.successes + state.failures,
+        successes: state.successes,
+        isFailed: state.failures > 0,
+      };
     });
     context.response.body = { sequences };
   })
