@@ -3,9 +3,11 @@ import {
   customType,
   integer,
   jsonb,
+  numeric,
   pgEnum,
   pgTable,
   timestamp,
+  unique,
   uuid,
   varchar,
 } from "drizzle-orm/pg-core";
@@ -19,43 +21,90 @@ export const sequencesTable = pgTable("sequences", {
   chainId: integer().notNull(),
 });
 
-export const batchStateEnum = pgEnum("batch_state", ["pending", "success", "failure"]);
+export const burstStateEnum = pgEnum("burst_state", ["pending", "success", "failure"]);
 
-export const batchesTable = pgTable("batches", {
+export const burstsTable = pgTable("bursts", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
   sequenceId: uuid().notNull().references(() => sequencesTable.id),
-  state: batchStateEnum().notNull().default("pending"),
+  state: burstStateEnum().notNull().default("pending"),
 });
 
-export const batchEventsTable = pgTable("batch_events", {
+export const burstEventsTable = pgTable("burst_events", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
-  batchId: integer().notNull().references(() => batchesTable.id),
+  burstId: integer().notNull().references(() => burstsTable.id),
   timestamp: timestamp({ withTimezone: true }).notNull().defaultNow(),
   event: jsonb().notNull(),
 });
 
 export const callsTable = pgTable("calls", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
-  batchId: integer().notNull().references(() => batchesTable.id),
+  burstId: integer().notNull().references(() => burstsTable.id),
   target: bytea().notNull(),
   calldata: bytea().notNull(),
 });
 
-export const publishedTxsTable = pgTable("published_txs", {
-  id: integer().primaryKey().generatedAlwaysAsIdentity(),
-  walletAddr: bytea().notNull(),
-  walletNonce: integer().notNull(),
-  chainId: integer().notNull(),
+
+
+// Added by prepareTx
+
+// initTxSender?            restoreTxs - mark done?
+export const txSendersTable = pgTable(
+  "tx_senders",
+  {
+    id: integer().primaryKey().generatedAlwaysAsIdentity(),
+    address: bytea().notNull(),
+    nonce: integer().notNull(),
+    chainId: integer().notNull(),
+  },
+  (table) => [unique().on(table.address, table.nonce, table.chainId)],
+);
+
+export const txStateEnum = pgEnum("tx_state", ["pending", "success", "reverted", "skipped"]);
+
+// sendRawTx
+export const txsTable = pgTable("txs", {
+  txHash: bytea().primaryKey(),
+  txSenderId: integer().notNull().references(() => txSendersTable.id),
+  txPayloadId: integer().notNull().references(() => txPayloadsTable.id),
+  state: burstStateEnum().notNull().default("pending"),
+  // receipt: logs? gas price? gas used? cost?
 });
 
-export const publishedTxHashesTable = pgTable("published_tx_hashes", {
+export const txPayloadsTable = pgTable("tx_payloads", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
-  publishedTxId: integer().notNull().references(() => publishedTxsTable.id),
-  txHash: bytea().notNull(),
+  target: bytea().notNull(),
+  calldata: bytea().notNull().default(new Uint8Array()),
+  value: numeric({precision: 78, scale: 0, mode: "bigint"}).notNull().default(BigInt(0)),
 });
 
-export const publishedCallsTable = pgTable("published_calls", {
+
+// Added by sendbatch
+
+export const batchesTable = pgTable("batches", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
-  txId: integer().notNull().references(() => publishedTxsTable.id),
   callId: integer().notNull().references(() => callsTable.id),
+  txPayloadId: integer().notNull().references(() => txPayloadsTable.id),
 });
+
+
+export const batchBurstsTable = pgTable("batch_bursts", {
+  id: integer().primaryKey().generatedAlwaysAsIdentity(),
+  batchId: integer().notNull().references(() => batchesTable.id),
+  burstId: integer().notNull().references(() => burstsTable.id),
+});
+
+
+
+
+
+
+// call[] -> burst
+// burst -> tx[]
+// tx[] -> sender
+
+// call[] -> burst => sendburst
+// tx -> sender => sendburst => prepareTx
+// burst -> tx => sendburst
+
+
+// tx -> sender =>

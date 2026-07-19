@@ -1,11 +1,11 @@
 {
-  "id": "1eda134b-219a-4738-8032-134ad047a535",
+  "id": "4bf95bde-3e7b-4332-888d-f0adbf55c4fb",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
-    "public.batch_events": {
-      "name": "batch_events",
+    "public.batch_calls": {
+      "name": "batch_calls",
       "schema": "",
       "columns": {
         "id": {
@@ -15,7 +15,7 @@
           "notNull": true,
           "identity": {
             "type": "always",
-            "name": "batch_events_id_seq",
+            "name": "batch_calls_id_seq",
             "schema": "public",
             "increment": "1",
             "startWith": "1",
@@ -31,31 +31,89 @@
           "primaryKey": false,
           "notNull": true
         },
-        "timestamp": {
-          "name": "timestamp",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "event": {
-          "name": "event",
-          "type": "jsonb",
+        "call_id": {
+          "name": "call_id",
+          "type": "integer",
           "primaryKey": false,
           "notNull": true
         }
       },
       "indexes": {},
       "foreignKeys": {
-        "batch_events_batch_id_batches_id_fk": {
-          "name": "batch_events_batch_id_batches_id_fk",
-          "tableFrom": "batch_events",
+        "batch_calls_batch_id_batches_id_fk": {
+          "name": "batch_calls_batch_id_batches_id_fk",
+          "tableFrom": "batch_calls",
           "tableTo": "batches",
           "columnsFrom": [
             "batch_id"
           ],
           "columnsTo": [
             "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "batch_calls_call_id_calls_id_fk": {
+          "name": "batch_calls_call_id_calls_id_fk",
+          "tableFrom": "batch_calls",
+          "tableTo": "calls",
+          "columnsFrom": [
+            "call_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.batch_txs": {
+      "name": "batch_txs",
+      "schema": "",
+      "columns": {
+        "batch_id": {
+          "name": "batch_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "tx_hash": {
+          "name": "tx_hash",
+          "type": "bytea",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "batch_txs_batch_id_batches_id_fk": {
+          "name": "batch_txs_batch_id_batches_id_fk",
+          "tableFrom": "batch_txs",
+          "tableTo": "batches",
+          "columnsFrom": [
+            "batch_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "batch_txs_tx_hash_txs_tx_hash_fk": {
+          "name": "batch_txs_tx_hash_txs_tx_hash_fk",
+          "tableFrom": "batch_txs",
+          "tableTo": "txs",
+          "columnsFrom": [
+            "tx_hash"
+          ],
+          "columnsTo": [
+            "tx_hash"
           ],
           "onDelete": "no action",
           "onUpdate": "no action"
@@ -87,6 +145,99 @@
             "cache": "1",
             "cycle": false
           }
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.burst_events": {
+      "name": "burst_events",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "identity": {
+            "type": "always",
+            "name": "burst_events_id_seq",
+            "schema": "public",
+            "increment": "1",
+            "startWith": "1",
+            "minValue": "1",
+            "maxValue": "2147483647",
+            "cache": "1",
+            "cycle": false
+          }
+        },
+        "burst_id": {
+          "name": "burst_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "timestamp": {
+          "name": "timestamp",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "event": {
+          "name": "event",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "burst_events_burst_id_bursts_id_fk": {
+          "name": "burst_events_burst_id_bursts_id_fk",
+          "tableFrom": "burst_events",
+          "tableTo": "bursts",
+          "columnsFrom": [
+            "burst_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.bursts": {
+      "name": "bursts",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "identity": {
+            "type": "always",
+            "name": "bursts_id_seq",
+            "schema": "public",
+            "increment": "1",
+            "startWith": "1",
+            "minValue": "1",
+            "maxValue": "2147483647",
+            "cache": "1",
+            "cycle": false
+          }
         },
         "sequence_id": {
           "name": "sequence_id",
@@ -96,7 +247,7 @@
         },
         "state": {
           "name": "state",
-          "type": "batch_state",
+          "type": "burst_state",
           "typeSchema": "public",
           "primaryKey": false,
           "notNull": true,
@@ -105,9 +256,9 @@
       },
       "indexes": {},
       "foreignKeys": {
-        "batches_sequence_id_sequences_id_fk": {
-          "name": "batches_sequence_id_sequences_id_fk",
-          "tableFrom": "batches",
+        "bursts_sequence_id_sequences_id_fk": {
+          "name": "bursts_sequence_id_sequences_id_fk",
+          "tableFrom": "bursts",
           "tableTo": "sequences",
           "columnsFrom": [
             "sequence_id"
@@ -146,8 +297,8 @@
             "cycle": false
           }
         },
-        "batch_id": {
-          "name": "batch_id",
+        "burst_id": {
+          "name": "burst_id",
           "type": "integer",
           "primaryKey": false,
           "notNull": true
@@ -167,12 +318,12 @@
       },
       "indexes": {},
       "foreignKeys": {
-        "calls_batch_id_batches_id_fk": {
-          "name": "calls_batch_id_batches_id_fk",
+        "calls_burst_id_bursts_id_fk": {
+          "name": "calls_burst_id_bursts_id_fk",
           "tableFrom": "calls",
-          "tableTo": "batches",
+          "tableTo": "bursts",
           "columnsFrom": [
-            "batch_id"
+            "burst_id"
           ],
           "columnsTo": [
             "id"
@@ -181,179 +332,6 @@
           "onUpdate": "no action"
         }
       },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.published_calls": {
-      "name": "published_calls",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "integer",
-          "primaryKey": true,
-          "notNull": true,
-          "identity": {
-            "type": "always",
-            "name": "published_calls_id_seq",
-            "schema": "public",
-            "increment": "1",
-            "startWith": "1",
-            "minValue": "1",
-            "maxValue": "2147483647",
-            "cache": "1",
-            "cycle": false
-          }
-        },
-        "tx_id": {
-          "name": "tx_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "call_id": {
-          "name": "call_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "published_calls_tx_id_published_txs_id_fk": {
-          "name": "published_calls_tx_id_published_txs_id_fk",
-          "tableFrom": "published_calls",
-          "tableTo": "published_txs",
-          "columnsFrom": [
-            "tx_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
-        "published_calls_call_id_calls_id_fk": {
-          "name": "published_calls_call_id_calls_id_fk",
-          "tableFrom": "published_calls",
-          "tableTo": "calls",
-          "columnsFrom": [
-            "call_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.published_tx_hashes": {
-      "name": "published_tx_hashes",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "integer",
-          "primaryKey": true,
-          "notNull": true,
-          "identity": {
-            "type": "always",
-            "name": "published_tx_hashes_id_seq",
-            "schema": "public",
-            "increment": "1",
-            "startWith": "1",
-            "minValue": "1",
-            "maxValue": "2147483647",
-            "cache": "1",
-            "cycle": false
-          }
-        },
-        "published_tx_id": {
-          "name": "published_tx_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "tx_hash": {
-          "name": "tx_hash",
-          "type": "bytea",
-          "primaryKey": false,
-          "notNull": true
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "published_tx_hashes_published_tx_id_published_txs_id_fk": {
-          "name": "published_tx_hashes_published_tx_id_published_txs_id_fk",
-          "tableFrom": "published_tx_hashes",
-          "tableTo": "published_txs",
-          "columnsFrom": [
-            "published_tx_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.published_txs": {
-      "name": "published_txs",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "integer",
-          "primaryKey": true,
-          "notNull": true,
-          "identity": {
-            "type": "always",
-            "name": "published_txs_id_seq",
-            "schema": "public",
-            "increment": "1",
-            "startWith": "1",
-            "minValue": "1",
-            "maxValue": "2147483647",
-            "cache": "1",
-            "cycle": false
-          }
-        },
-        "wallet_addr": {
-          "name": "wallet_addr",
-          "type": "bytea",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "wallet_nonce": {
-          "name": "wallet_nonce",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "chain_id": {
-          "name": "chain_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
@@ -385,16 +363,121 @@
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false
+    },
+    "public.tx_senders": {
+      "name": "tx_senders",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "identity": {
+            "type": "always",
+            "name": "tx_senders_id_seq",
+            "schema": "public",
+            "increment": "1",
+            "startWith": "1",
+            "minValue": "1",
+            "maxValue": "2147483647",
+            "cache": "1",
+            "cycle": false
+          }
+        },
+        "address": {
+          "name": "address",
+          "type": "bytea",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "nonce": {
+          "name": "nonce",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "chain_id": {
+          "name": "chain_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.txs": {
+      "name": "txs",
+      "schema": "",
+      "columns": {
+        "tx_hash": {
+          "name": "tx_hash",
+          "type": "bytea",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "txs_sender_id": {
+          "name": "txs_sender_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "state": {
+          "name": "state",
+          "type": "burst_state",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'pending'"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "txs_txs_sender_id_tx_senders_id_fk": {
+          "name": "txs_txs_sender_id_tx_senders_id_fk",
+          "tableFrom": "txs",
+          "tableTo": "tx_senders",
+          "columnsFrom": [
+            "txs_sender_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
     }
   },
   "enums": {
-    "public.batch_state": {
-      "name": "batch_state",
+    "public.burst_state": {
+      "name": "burst_state",
       "schema": "public",
       "values": [
         "pending",
         "success",
         "failure"
+      ]
+    },
+    "public.tx_state": {
+      "name": "tx_state",
+      "schema": "public",
+      "values": [
+        "pending",
+        "success",
+        "reverted",
+        "skipped"
       ]
     }
   },

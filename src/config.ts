@@ -91,7 +91,8 @@ function getRpcUrlsValue(): RpcUrls {
 
 // Wallets configuration
 
-export type Wallets = Record<number, WalletClient & PublicClient & { confirmations: number }>;
+export type Wallet = WalletClient & PublicClient & { confirmations: number };
+export type Wallets = Record<number, Wallet>;
 
 export function getWallets(): Wallets {
   return wallets ??= getWalletsValue();
