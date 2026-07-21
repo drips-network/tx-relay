@@ -1,7 +1,7 @@
 import { Application, Context, Router } from "oak";
 import { delay } from "async";
 import { z } from "zod";
-import { concat, decodeEventLog, type DecodeEventLogReturnType, getContractAddress, Hex, hexToBytes, isAddress, isHex, keccak256, pad, TransactionReceipt } from "viem";
+import { Address, concat, decodeEventLog, type DecodeEventLogReturnType, getAddress, getContractAddress, Hex, hexToBytes, isAddress, isHex, keccak256, pad, stringToHex, TransactionReceipt } from "viem";
 
 //------------------------------------------------
 //
@@ -10,7 +10,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 // import { usersTable } from "./db/schema.ts";
 import { batchBurstsTable, batchesTable, burstsTable, callsTable, sequencesTable, txPayloadsTable, txSendersTable, txsTable, txStateEnum } from "./db/schema.ts";
-import { getDbUrl, getMulticall3s, getPort, getWallets, Wallet } from "./config.ts";
+import { getDbUrl, getPort, getWallets, Wallet } from "./config.ts";
 
 const db = drizzle({ connection: getDbUrl(), casing: "snake_case" });
 await migrate(db, { migrationsFolder: "./drizzle" });
@@ -27,7 +27,8 @@ await migrate(db, { migrationsFolder: "./drizzle" });
 // db.query.
 
 import executorOutputJson from "./Executor.generated.json" with { type: "json" };
-const { abi: executorAbi, bytecode: { object: executorBytecode },  } = executorOutputJson;
+const executorAbi = executorOutputJson.abi;
+const executorBytecode: Hex =  executorOutputJson.bytecode.object as Hex;
 
 
 const singletonFactory = "0x914d7Fec6aaC8cd542e72Bca78B30650d45643d7";
@@ -40,42 +41,42 @@ const executorAddr = getContractAddress({
 });
 
 
-async function sendSingleTxOld(wallet, target, calldata) {
-  const nonce = await wallet.getTransactionCount({ address: wallet.account.address });
+// async function sendSingleTxOld(wallet, target, calldata) {
+//   const nonce = await wallet.getTransactionCount({ address: wallet.account.address });
 
-  const request = await wallet.prepareTransactionRequest({ to: target, data: calldata, nonce });
-  const signedTx = await wallet.signTransaction(request);
-  const {txSenderId, txPayloadId} = await db.transaction(async (dbTx) => {
-    const [{txSenderId}] = await dbTx.insert(txSendersTable) .values({ address: wallet.account.address , nonce, chainId: wallet.chain.id})
-      .returning({txSenderId: txSendersTable.id});
-    const [{txPayloadId}] = await dbTx.insert(txPayloadsTable)
-      .values({target, calldata}).returning({txPayloadId: txPayloadsTable.id});
-    await dbTx.insert(txsTable).values({ txHash: keccak256(signedTx), txSenderId, txPayloadId });
-    return {txSenderId, txPayloadId};
-  });
-  const txs = {    nonce, hashes: [keccak256(signedTx)]}; // lastGasPrice?
-  await wallet.sendRawTransaction({ serializedTransaction: signedTx }); // TODO errors
-  // queue branch
+//   const request = await wallet.prepareTransactionRequest({ to: target, data: calldata, nonce });
+//   const signedTx = await wallet.signTransaction(request);
+//   const {txSenderId, txPayloadId} = await db.transaction(async (dbTx) => {
+//     const [{txSenderId}] = await dbTx.insert(txSendersTable) .values({ address: wallet.account.address , nonce, chainId: wallet.chain.id})
+//       .returning({txSenderId: txSendersTable.id});
+//     const [{txPayloadId}] = await dbTx.insert(txPayloadsTable)
+//       .values({target, calldata}).returning({txPayloadId: txPayloadsTable.id});
+//     await dbTx.insert(txsTable).values({ txHash: keccak256(signedTx), txSenderId, txPayloadId });
+//     return {txSenderId, txPayloadId};
+//   });
+//   const txs = {    nonce, hashes: [keccak256(signedTx)]}; // lastGasPrice?
+//   await wallet.sendRawTransaction({ serializedTransaction: signedTx }); // TODO errors
+//   // queue branch
 
 
-  const {status, receipt} = await watchTxs(wallet, txs);
-  if(status === "submitted") { // && txs.hashes < attempts
-    // Retry
-    // await db.insert(txsTable).values({ txHash: keccak256(signedTx), txSenderId, txPayloadId });
-    // const txs = {    nonce, hashes: [keccak256(signedTx)]};
-    // await wallet.sendRawTransaction({ serializedTransaction: signedTx })
-  }
-  await db.transaction(async (dbTx) => {
-    await dbTx.update(txsTable).set({state: 'skipped'}).where(eq(txsTable.txSenderId, txSenderId));
-    if(status == "mined") {
-        const statusToState: Record<TransactionReceipt["status"], (typeof txStateEnum.enumValues)[number]>
-          = { success: "success", reverted: "reverted" };
-        await db.update(txsTable)
-          .set({state: statusToState[receipt.status]})
-          .where(eq(txsTable.txHash, hexToBytes(receipt.transactionHash)));
-      }
-  });
-}
+//   const {status, receipt} = await watchTxs(wallet, txs);
+//   if(status === "submitted") { // && txs.hashes < attempts
+//     // Retry
+//     // await db.insert(txsTable).values({ txHash: keccak256(signedTx), txSenderId, txPayloadId });
+//     // const txs = {    nonce, hashes: [keccak256(signedTx)]};
+//     // await wallet.sendRawTransaction({ serializedTransaction: signedTx })
+//   }
+//   await db.transaction(async (dbTx) => {
+//     await dbTx.update(txsTable).set({state: 'skipped'}).where(eq(txsTable.txSenderId, txSenderId));
+//     if(status == "mined") {
+//         const statusToState: Record<TransactionReceipt["status"], (typeof txStateEnum.enumValues)[number]>
+//           = { success: "success", reverted: "reverted" };
+//         await db.update(txsTable)
+//           .set({state: statusToState[receipt.status]})
+//           .where(eq(txsTable.txHash, hexToBytes(receipt.transactionHash)));
+//       }
+//   });
+// }
 
 // A sender is "parked":
 // - not enough funds for a TX retrial
@@ -139,32 +140,32 @@ async function sendSingleTxOld(wallet, target, calldata) {
 //   return watchTxs(wallet, txs);
 // }
 
-async function watchTxsOld(wallet, txs) {
-  let skipOnBlock;
-  for(let attempt = 0; true; attempt++) {
-    let receipt;
-    for (const hash of txs.hashes.toReversed()) {
-        try {
-          receipt = await wallet.getTransactionReceipt({ hash });
-        } catch(error) {continue;}
-        if (receipt.blockNumber + wallet.confirmations >= await wallet.getBlockNumber())
-          return {status: "mined", receipt};
-        break;
-    }
+// async function watchTxsOld(wallet, txs) {
+//   let skipOnBlock;
+//   for(let attempt = 0; true; attempt++) {
+//     let receipt;
+//     for (const hash of txs.hashes.toReversed()) {
+//         try {
+//           receipt = await wallet.getTransactionReceipt({ hash });
+//         } catch(error) {continue;}
+//         if (receipt.blockNumber + wallet.confirmations >= await wallet.getBlockNumber())
+//           return {status: "mined", receipt};
+//         break;
+//     }
 
-    if(!receipt && await wallet.getTransactionCount({ address: wallet.account.address }) > txs.nonce) {
-      const blockNumber = await wallet.getBlockNumber();
-      skipOnBlock ??= blockNumber + wallet.confirmations;
-      if(blockNumber >= skipOnBlock) return {status: "skipped"}
-    }
-    else
-      skipOnBlock = undefined;
+//     if(!receipt && await wallet.getTransactionCount({ address: wallet.account.address }) > txs.nonce) {
+//       const blockNumber = await wallet.getBlockNumber();
+//       skipOnBlock ??= blockNumber + wallet.confirmations;
+//       if(blockNumber >= skipOnBlock) return {status: "skipped"}
+//     }
+//     else
+//       skipOnBlock = undefined;
 
-    if(!receipt && !skipOnBlock && attempt >= 10) return {status: "pending"}; // TODO config
+//     if(!receipt && !skipOnBlock && attempt >= 10) return {status: "pending"}; // TODO config
 
-    await delay(10_000); // TODO per-chain config
-  }
-}
+//     await delay(10_000); // TODO per-chain config
+//   }
+// }
 
 
 
@@ -180,58 +181,144 @@ async function watchTxsOld(wallet, txs) {
 //      if(result != "unknown") db.tx.state = success
 //       return (newTxs, result)
 
-type Task = () => Promise<Task[] | Task | undefined>;
+type Tasks = Task[] | Task | undefined;
+type Task = () => Promise<Tasks>;
 
 async function runWalletWorker(wallet: Wallet) {
-  const tasks: Task[] = [async() => initExecutor(wallet)];
+  const tasks: Task[] = [() => initRelay(wallet)];
   while(tasks.length) {
-    const newTasks = await tasks.pop()();
+    const task = tasks.pop() as Task;
+    const newTasks = await task();
     tasks.push(...[newTasks ?? []].flat().reverse());
   }
   console.log("Stopping worker for chain", wallet.chain.name);
 }
 
-async function runExecutor(wallet) {
-  const tasks = [];
-  if(!await wallet.getCode({ address: executorAddr })) {
-    tasks.push(async() => sendTx(wallet, singletonFactory, concat([executorSalt, executorBytecode])));
+async function initRelay(wallet: Wallet): Promise<Tasks> {
+  if(await wallet.getCode({ address: executorAddr })) return () => runRelay(wallet);
+  return [
+    () => sendTx({wallet, target: singletonFactory, calldata: concat([executorSalt, executorBytecode])}),
+    async () => {
+      if(await wallet.getCode({ address: executorAddr })) return () => runRelay(wallet);
+      else console.log("Failed to deploy executor for chain", wallet.chain.name);
+    },
+  ];
+}
+
+async function runRelay(wallet: Wallet): Promise<Tasks> {
+  while(true) {
+    console.log("Executor running for", wallet.chain.name);
+    await delay(2_000);
   }
-  return tasks;
 }
 
-async function initExecutor(wallet) {
 
+
+// async function sendTx(args: {wallet, retries, pendingTxs, senderId, nonce, txPayloadId, target, calldata, value}) {
+//   // TODO separate function?
+//   const nonce = await wallet.getTransactionCount({ address: wallet.account.address });
+//   args.nonce ??= nonce;
+//   if(args.nonce !== nonce) {
+//     // TODO go to watchTxs with retrials
+//   }
+//   const request = await wallet.prepareTransactionRequest({ to: target, data: calldata, value, nonce });
+//   // TODO when not enough funds: if pendingTxs - burn nonce, if !pendingTxs || burning - wait for funds
+//   const signedTx = await wallet.signTransaction(request);
+
+
+//   await db.transaction(async (dbTx) => {
+//     if(args.senderId === undefined){
+//       [{txSenderId: args.senderId}] = await dbTx.insert(txSendersTable)
+//         .values({ address: args.wallet.account.address , nonce, chainId: wallet.chain.id})
+//         .returning({txSenderId: txSendersTable.id});}
+//     if(args.txPayloadId === undefined){
+//       const [{txPayloadId: args.txPayloadId}] = await dbTx.insert(txPayloadsTable)
+//         .values({target, calldata}).returning({txPayloadId: txPayloadsTable.id});}
+//     await dbTx.insert(txsTable).values({ txHash: keccak256(signedTx), txSenderId: args.txSenderId, txPayloadId: args.txPayloadId });
+//   });
+
+//   args.pendingTxs ??= [];
+//   args.pendingTxs.push(keccak256(signedTx));
+//   await args.wallet.sendRawTransaction({ serializedTransaction: signedTx }); // TODO errors
+
+
+//   // TODO config
+//   const onPending = async() => resendTx({wallet, attempts: 2, pendingTxs, senderId, nonce, txPayloadId, target, calldata, value});
+//   return watchTxs({wallet, pendingTxs: args.pendingTxs, nonce, senderId: args.senderId, onPending});
+// }
+
+async function sendTx({wallet, target, calldata, value}: { wallet: Wallet; target: Address; calldata?: Hex; value?: bigint }): Promise<Tasks> {
+  console.log("Sending transaction to", target, "on chain", wallet.chain.name);
+  const senderAddr = wallet.account.address;
+  const nonce = await wallet.getTransactionCount({ address: senderAddr });
+  const chainId = wallet.chain.id;
+
+  await db.insert(txSendersTable) .values({ address: senderAddr , nonce, chainId }) .onConflictDoNothing();
+  const [{txSenderId}] = await db.select({txSenderId: txSendersTable.id}).from(txSendersTable)
+    .where(and(and(eq(txSendersTable.address, senderAddr), eq(txSendersTable.nonce, nonce)), eq(txSendersTable.chainId, chainId)));
+  const [{txPayloadId}] = await db.insert(txPayloadsTable)
+    .values({target, calldata}).returning({txPayloadId: txPayloadsTable.id});
+
+  return async() => sendTxAttempt({wallet, retries: 2, pendingTxs: [], txSenderId, nonce, txPayloadId, target, calldata, value});
 }
 
-async function sendTx(args: {wallet, retries, pendingTxs, senderId, nonce, txPayloadId, recipient, calldata, value}) {
-  const nonce = await wallet.getTransactionCount({ address: wallet.account.address });
-  args.nonce ??= nonce;
-  if(args.nonce !== nonce) {
-    // TODO check TXs with no retrials and set all to 'skipped'
+async function sendTxAttempt({wallet, retries, pendingTxs, txSenderId, nonce, txPayloadId, target, calldata, value}
+    : { wallet: Wallet; retries: number, pendingTxs: Hex[], txSenderId: number, nonce: number, txPayloadId: number, target: Address; calldata?: Hex; value?: bigint }): Promise<Tasks>{
+  const onPending =  async() => retries ?
+    sendTxAttempt({wallet, retries: retries - 1, pendingTxs, txSenderId, nonce, txPayloadId, target, calldata, value})
+    : burnNonce({wallet, pendingTxs, txSenderId, nonce});
+
+  // TODO deduplicate probably vvvvvvv
+  if(nonce !== await wallet.getTransactionCount({ address: wallet.account.address })) {
+    // TODO go to watchTxs with retrials
   }
   const request = await wallet.prepareTransactionRequest({ to: target, data: calldata, value, nonce });
+  // TODO when not enough funds: if pendingTxs - burn nonce, if !pendingTxs || burning - wait for funds
   const signedTx = await wallet.signTransaction(request);
 
+  await db.insert(txsTable).values({ txHash: keccak256(signedTx), txSenderId, txPayloadId });
 
-  await db.transaction(async (dbTx) => {
-    if(args.senderId === undefined){
-      [{txSenderId: args.senderId}] = await dbTx.insert(txSendersTable)
-        .values({ address: args.wallet.account.address , nonce, chainId: wallet.chain.id})
-        .returning({txSenderId: txSendersTable.id});}
-    if(args.txPayloadId === undefined){
-      const [{txPayloadId: args.txPayloadId}] = await dbTx.insert(txPayloadsTable)
-        .values({target, calldata}).returning({txPayloadId: txPayloadsTable.id});}
-    await dbTx.insert(txsTable).values({ txHash: keccak256(signedTx), txSenderId: args.txSenderId, txPayloadId: args.txPayloadId });
-  });
+  pendingTxs.push(keccak256(signedTx));
+  await wallet.sendRawTransaction({ serializedTransaction: signedTx }); // TODO errors
 
-  args.pendingTxs ??= [];
-  args.pendingTxs.push(keccak256(signedTx));
-  await args.wallet.sendRawTransaction({ serializedTransaction: signedTx }); // TODO errors
+  return async() => watchTxs({wallet, pendingTxs, nonce, txSenderId, onPending});
+  // TODO deduplicate probably ^^^^^^^
 
-  return watchTxs({wallet, pendingTxs: args.pendingTxs, nonce, senderId: args.senderId, onMined});
 }
 
-async function watchTxs({wallet, pendingTxs, nonce, senderId, onSuccess, onPending, onSkipped}) {
+const burnTarget: Address = getAddress(stringToHex("Nonce burning target"));
+const burnTxPayloadId: number = (await db.insert(txPayloadsTable)
+    .values({target: burnTarget}).returning({burnTxPayloadId: txPayloadsTable.id}))[0].burnTxPayloadId;
+
+async function burnNonce({wallet, pendingTxs, txSenderId, nonce, delayMs}
+  : { wallet: Wallet; pendingTxs: Hex[], txSenderId: number, nonce: number, delayMs?: number }): Promise<Tasks> {
+  if(!delayMs) delayMs = 1_000;
+  else {
+    await delay(delayMs);
+    delayMs = Math.min(delayMs * 10, 60_000);
+    // TODO if max delay reached, stop requiring +10% gas price
+  }
+  const onPending = async() => burnNonce({wallet, pendingTxs, txSenderId, nonce, delayMs});
+
+  // TODO deduplicate probably vvvvvvv
+  if(nonce !== await wallet.getTransactionCount({ address: wallet.account.address })) {
+    // TODO go to watchTxs with retrials
+  }
+  const request = await wallet.prepareTransactionRequest({ to: burnTarget, nonce });
+  // TODO when not enough funds: if pendingTxs - burn nonce, if !pendingTxs || burning - wait for funds
+  const signedTx = await wallet.signTransaction(request);
+
+  await db.insert(txsTable).values({ txHash: keccak256(signedTx), txSenderId, txPayloadId: burnTxPayloadId });
+
+  pendingTxs.push(keccak256(signedTx));
+  await wallet.sendRawTransaction({ serializedTransaction: signedTx }); // TODO errors
+
+  return async() => watchTxs({wallet, pendingTxs, txSenderId, nonce, onPending});
+  // TODO deduplicate probably ^^^^^^^
+}
+
+async function watchTxs({wallet, pendingTxs, txSenderId, nonce, onPending}
+  : { wallet: Wallet; pendingTxs: Hex[], txSenderId: number, nonce: number, onPending: Task }): Promise<Tasks> {
   let skipOnBlock;
   for(let attempt = 0; true; attempt++) {
     let receipt;
@@ -240,8 +327,8 @@ async function watchTxs({wallet, pendingTxs, nonce, senderId, onSuccess, onPendi
           receipt = await wallet.getTransactionReceipt({ hash });
         } catch(error) {continue;}
         if (receipt.blockNumber + wallet.confirmations >= await wallet.getBlockNumber()) {
-          await finalizeTx(senderId, receipt);
-          return onSuccess;
+          await finalizeTxs(txSenderId, receipt);
+          return;
         }
         break;
     }
@@ -250,8 +337,8 @@ async function watchTxs({wallet, pendingTxs, nonce, senderId, onSuccess, onPendi
       const blockNumber = await wallet.getBlockNumber();
       skipOnBlock ??= blockNumber + wallet.confirmations;
       if(blockNumber >= skipOnBlock) {
-        await skipTx(senderId);
-        return onSkipped;
+        await skipTx(txSenderId);
+        return;
       }
     }
     else
@@ -263,9 +350,9 @@ async function watchTxs({wallet, pendingTxs, nonce, senderId, onSuccess, onPendi
   }
 }
 
-async function finalizeTx(senderId, receipt) {
+async function finalizeTxs(txSenderId: number, receipt) {
   await db.transaction(async (dbTx) => {
-    await dbTx.update(txsTable).set({state: 'skipped'}).where(eq(txsTable.txSenderId, senderId));
+    await dbTx.update(txsTable).set({state: 'skipped'}).where(eq(txsTable.txSenderId, txSenderId));
     const statusToState: Record<TransactionReceipt["status"], (typeof txStateEnum.enumValues)[number]>
       = { success: "success", reverted: "reverted" };
     await dbTx.update(txsTable)
@@ -310,8 +397,8 @@ async function finalizeTx(senderId, receipt) {
   });
 }
 
-async function skipTx(senderId) {
-  await db.update(txsTable).set({state: 'skipped'}).where(eq(txsTable.txSenderId, senderId));
+async function skipTx(txSenderId) {
+  await db.update(txsTable).set({state: 'skipped'}).where(eq(txsTable.txSenderId, txSenderId));
 }
 
 
@@ -514,8 +601,6 @@ Object.values(wallets).forEach(runWalletWorker);
 //
 // in all RPC calls, do the retrials
 
-const multicall3s = getMulticall3s();
-
 const sendSchema = z.object({
   calls: z.array(z.object({
     target: z.string().refine(isAddress),
@@ -610,40 +695,6 @@ router
     });
 
     context.response.body = { sequences };
-  })
-  .post("/:chainId/send", async (context) => {
-    const multicall3 = multicall3s[Number(context.params.chainId)];
-    if (!multicall3) {
-      context.response.status = 404;
-      context.response.body = "Unsupported chain ID";
-      return;
-    }
-
-    let sendArg: z.infer<typeof sendSchema>;
-    try {
-      sendArg = sendSchema.parse(await context.request.body.json());
-    } catch (error) {
-      context.response.status = 400;
-      context.response.body = String(error);
-      return;
-    }
-
-    const calls = sendArg.calls.map(({ target, calldata }) => ({
-      target: target as Hex,
-      callData: calldata as Hex,
-      allowFailure: false,
-    }));
-
-    let txHash: Hex;
-    try {
-      txHash = await multicall3.write.aggregate3([calls]);
-    } catch (error) {
-      context.response.status = 500;
-      context.response.body = String(error);
-      return;
-    }
-
-    context.response.body = { txHash };
   });
 
 await new Application()

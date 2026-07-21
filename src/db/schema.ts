@@ -11,9 +11,12 @@ import {
   uuid,
   varchar,
 } from "drizzle-orm/pg-core";
+import { bytesToHex, type Hex, hexToBytes } from "viem";
 
-const bytea = customType<{ data: Uint8Array; driverData: Uint8Array }>({
+const bytea = customType<{ data: Hex; driverData: Uint8Array }>({
   dataType: () => "bytea",
+  toDriver: hexToBytes,
+  fromDriver: bytesToHex,
 });
 
 export const sequencesTable = pgTable("sequences", {
@@ -63,7 +66,8 @@ export const txStateEnum = pgEnum("tx_state", ["pending", "success", "reverted",
 
 // sendRawTx
 export const txsTable = pgTable("txs", {
-  txHash: bytea().primaryKey(),
+  id: integer().primaryKey().generatedAlwaysAsIdentity(),
+  txHash: bytea().unique(),
   txSenderId: integer().notNull().references(() => txSendersTable.id),
   txPayloadId: integer().notNull().references(() => txPayloadsTable.id),
   state: burstStateEnum().notNull().default("pending"),
@@ -73,7 +77,7 @@ export const txsTable = pgTable("txs", {
 export const txPayloadsTable = pgTable("tx_payloads", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
   target: bytea().notNull(),
-  calldata: bytea().notNull().default(new Uint8Array()),
+  calldata: bytea().notNull().default("0x"),
   value: numeric({precision: 78, scale: 0, mode: "bigint"}).notNull().default(BigInt(0)),
 });
 

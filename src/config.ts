@@ -1,13 +1,16 @@
 import { z } from "zod";
 import {
+  Chain,
   createWalletClient,
   getContract,
   GetContractReturnType,
   Hex,
   http,
   parseAbi,
+  PrivateKeyAccount,
   publicActions,
   PublicClient,
+  Transport,
   WalletClient,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
@@ -48,7 +51,7 @@ const configSchema = z.object({
   wallets: z.array(z.object({
     chains: z.array(z.object({
       chainId: z.number(),
-      confirmations: z.number().default(1),
+      confirmations: z.bigint().default(1n),
     })),
     privateKey: z.string(),
   })).default([]),
@@ -56,7 +59,8 @@ const configSchema = z.object({
 
 // All supported chains
 
-type Chains = Record<number, (typeof viemChains)[keyof typeof viemChains]>;
+// type Chains = Record<number, (typeof viemChains)[keyof typeof viemChains]>;
+type Chains = Record<number, Chain>;
 
 function getChains(): Chains {
   // Resolve duplicate chains by keeping the version from the lexically first key e.g. suffix-free.
@@ -91,7 +95,10 @@ function getRpcUrlsValue(): RpcUrls {
 
 // Wallets configuration
 
-export type Wallet = WalletClient & PublicClient & { confirmations: number };
+export type Wallet =
+  & WalletClient<Transport, Chain, PrivateKeyAccount>
+  & PublicClient<Transport, Chain, PrivateKeyAccount>
+  & { confirmations: bigint };
 export type Wallets = Record<number, Wallet>;
 
 export function getWallets(): Wallets {
@@ -120,39 +127,39 @@ function getWalletsValue(): Wallets {
 
 // Mutlicall3 wallets configuration
 
-const multicall3Abi = parseAbi([
-  "struct Call3 { address target; bool allowFailure; bytes callData; }",
-  "struct Result { bool success; bytes returnData; }",
-  "function aggregate3(Call3[] calls) payable returns (Result[] returnData)",
-]);
+// const multicall3Abi = parseAbi([
+//   "struct Call3 { address target; bool allowFailure; bytes callData; }",
+//   "struct Result { bool success; bytes returnData; }",
+//   "function aggregate3(Call3[] calls) payable returns (Result[] returnData)",
+// ]);
 
-export type Multicall3 = GetContractReturnType<typeof multicall3Abi, WalletClient>;
-export type Multicall3s = Record<number, Multicall3>;
+// export type Multicall3 = GetContractReturnType<typeof multicall3Abi, WalletClient>;
+// export type Multicall3s = Record<number, Multicall3>;
 
-export function getMulticall3s(): Multicall3s {
-  return multicall3s ??= getMulticall3sValue();
-}
+// export function getMulticall3s(): Multicall3s {
+//   return multicall3s ??= getMulticall3sValue();
+// }
 
-let multicall3s: Multicall3s | undefined;
+// let multicall3s: Multicall3s | undefined;
 
-function getMulticall3sValue(): Multicall3s {
-  const chains = getChains();
-  const rpcUrls = getRpcUrls();
-  const multicall3s: Multicall3s = {};
-  for (const wallet of getConfig().wallets) {
-    const account = privateKeyToAccount(wallet.privateKey as Hex);
-    for (const { chainId } of wallet.chains) {
-      const chain = chains[chainId];
-      if (!chain) throw new Error("Unknown wallet chain ID " + chainId);
+// function getMulticall3sValue(): Multicall3s {
+//   const chains = getChains();
+//   const rpcUrls = getRpcUrls();
+//   const multicall3s: Multicall3s = {};
+//   for (const wallet of getConfig().wallets) {
+//     const account = privateKeyToAccount(wallet.privateKey as Hex);
+//     for (const { chainId } of wallet.chains) {
+//       const chain = chains[chainId];
+//       if (!chain) throw new Error("Unknown wallet chain ID " + chainId);
 
-      const address = chain.contracts?.multicall3?.address;
-      if (!address) throw new Error("No multicall3 for chain ID " + chainId);
+//       const address = chain.contracts?.multicall3?.address;
+//       if (!address) throw new Error("No multicall3 for chain ID " + chainId);
 
-      const client = createWalletClient({ account, chain, transport: http(rpcUrls[chainId]) });
+//       const client = createWalletClient({ account, chain, transport: http(rpcUrls[chainId]) });
 
-      if (multicall3s[chainId]) throw new Error("Duplicate wallets for chain ID " + chainId);
-      multicall3s[chainId] = getContract({ address, client, abi: multicall3Abi });
-    }
-  }
-  return multicall3s;
-}
+//       if (multicall3s[chainId]) throw new Error("Duplicate wallets for chain ID " + chainId);
+//       multicall3s[chainId] = getContract({ address, client, abi: multicall3Abi });
+//     }
+//   }
+//   return multicall3s;
+// }
