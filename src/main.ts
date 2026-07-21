@@ -1,7 +1,9 @@
 import { Application, Context, Router } from "oak";
 import { delay } from "async";
 import { z } from "zod";
-import { Address, concat, decodeEventLog, type DecodeEventLogReturnType, getAddress, getContractAddress, Hex, hexToBytes, isAddress, isHex, keccak256, pad, stringToHex, TransactionReceipt } from "viem";
+import { Abi, Address, concat, decodeEventLog, type DecodeEventLogReturnType, getAddress,
+  getContractAddress, Hex, hexToBytes, isAddress, isHex, keccak256, pad, stringToHex,
+  TransactionReceipt } from "viem";
 
 //------------------------------------------------
 //
@@ -27,7 +29,7 @@ await migrate(db, { migrationsFolder: "./drizzle" });
 // db.query.
 
 import executorOutputJson from "./Executor.generated.json" with { type: "json" };
-const executorAbi = executorOutputJson.abi;
+const executorAbi: Abi = executorOutputJson.abi as Abi;
 const executorBytecode: Hex =  executorOutputJson.bytecode.object as Hex;
 
 
@@ -187,8 +189,7 @@ type Task = () => Promise<Tasks>;
 async function runWalletWorker(wallet: Wallet) {
   const tasks: Task[] = [() => initRelay(wallet)];
   while(tasks.length) {
-    const task = tasks.pop() as Task;
-    const newTasks = await task();
+    const newTasks = await tasks.pop()!();
     tasks.push(...[newTasks ?? []].flat().reverse());
   }
   console.log("Stopping worker for chain", wallet.chain.name);
@@ -350,16 +351,19 @@ async function watchTxs({wallet, pendingTxs, txSenderId, nonce, onPending}
   }
 }
 
-async function finalizeTxs(txSenderId: number, receipt) {
+async function finalizeTxs(txSenderId: number, receipt: TransactionReceipt) {
   await db.transaction(async (dbTx) => {
     await dbTx.update(txsTable).set({state: 'skipped'}).where(eq(txsTable.txSenderId, txSenderId));
     const statusToState: Record<TransactionReceipt["status"], (typeof txStateEnum.enumValues)[number]>
       = { success: "success", reverted: "reverted" };
     await dbTx.update(txsTable)
       .set({state: statusToState[receipt.status]})
-      .where(eq(txsTable.txHash, hexToBytes(receipt.transactionHash)));
+      .where(eq(txsTable.txHash, receipt.transactionHash));
 
-    const executedBursts = await dbTx.select({
+    const executedBursts: {
+      sequenceId: string,
+      burstId: number,
+      }[] = await dbTx.select({
       sequenceId: burstsTable.sequenceId,
       burstId: burstsTable.id,
     })
@@ -367,24 +371,25 @@ async function finalizeTxs(txSenderId: number, receipt) {
       .innerJoin(batchesTable, eq(batchesTable.txPayloadId, txsTable.txPayloadId))
       .innerJoin(batchBurstsTable, eq(batchBurstsTable.batchId, batchesTable.id))
       .innerJoin(burstsTable, eq(burstsTable.id, batchBurstsTable.burstId))
-      .where(eq(txsTable.txHash, hexToBytes(receipt.transactionHash)))
+      .where(eq(txsTable.txHash, receipt.transactionHash))
       .orderBy(batchBurstsTable.id);
     if(!executedBursts.length) return;
 
-    const {topics, data} = receipt.logs.at(-1);
-    const successes = decodeEventLog({ abi: executorAbi, eventName: "Receipts", topics, data})
-      .args.receipts.map(({successes}) => Number(successes));
+    const {topics, data} = receipt.logs.at(-1)!;
+    const logs = decodeEventLog({ abi: executorAbi, eventName: "Receipts", topics, data}).args as
+       unknown as { receipts: { successes: bigint; gasUsed: bigint }[] };
+    const successes = logs.receipts.map(({successes}) => Number(successes));
 
-    const sequences = [];
-    for({sequenceId, burstId} of executedBursts){
+    const sequences: {sequenceId: string, burstIds: number[], successes: number}[] = [];
+    for(const {sequenceId, burstId} of executedBursts){
       if(sequences.at(-1)?.sequenceId !== sequenceId)
-        sequences.push({sequenceId, burstIds: [], successes: successes.shift()});
-      sequences.at(-1).burstIds.push(burstId);
+        sequences.push({sequenceId, burstIds: [], successes: successes.shift()!});
+      sequences.at(-1)!.burstIds.push(burstId);
     }
 
     const successBurstIds = [];
     const failedSequenceIds = [];
-    for({sequenceId, burstIds, successes} of sequences){
+    for(const {sequenceId, burstIds, successes} of sequences){
       successBurstIds.push(...burstIds.slice(0, successes));
       if(burstIds.length < successes) failedSequenceIds.push(sequenceId);
     }
@@ -397,209 +402,12 @@ async function finalizeTxs(txSenderId: number, receipt) {
   });
 }
 
-async function skipTx(txSenderId) {
+async function skipTx(txSenderId: number) {
   await db.update(txsTable).set({state: 'skipped'}).where(eq(txsTable.txSenderId, txSenderId));
 }
 
-
-
-//   const {status, receipt} = await localWatchTxs(wallet, txs);
-//   if(status === "submitted") { // && txs.hashes < attempts
-//     if(args.retries > 0) {
-//       args.retries--;
-
-//     }
-//     // Retry
-//     // await db.insert(txsTable).values({ txHash: keccak256(signedTx), txSenderId, txPayloadId });
-//     // const txs = {    nonce, hashes: [keccak256(signedTx)]};
-//     // await wallet.sendRawTransaction({ serializedTransaction: signedTx })
-//   }
-//   await db.transaction(async (dbTx) => {
-//     await dbTx.update(txsTable).set({state: 'skipped'}).where(eq(txsTable.txSenderId, txSenderId));
-//     if(status == "mined") {
-//         const statusToState: Record<TransactionReceipt["status"], (typeof txStateEnum.enumValues)[number]>
-//           = { success: "success", reverted: "reverted" };
-//         await db.update(txsTable)
-//           .set({state: statusToState[receipt.status]})
-//           .where(eq(txsTable.txHash, hexToBytes(receipt.transactionHash)));
-//       }
-//   });
-// }
-// on success - clean up DB |
-// on failure - X retrials with gas bump or burn
-
-
-
-//   if(!await wallet.getCode({ address: executorAddr })) {
-
-
-//     console.log("Deploying executor on chain", wallet.chain.name);
-
-//     await sendSingleTx(wallet, singletonFactory, concat([executorSalt, executorBytecode]));
-//   }
-
-//   while(true) {
-//     console.log("Hello", wallet.chain.name, new Date().toLocaleString());
-//     await new Promise(resolve => setTimeout(resolve, 5000));
-
-//   }
-// }
-
-//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-//  restoreTxs(confirmations):
-//      for batchAttempt in db.batchAttempt where chain == chain
-//          txs = read db.batchAttempt
-//          result = observeTxs(txs, confirmations)
-//          if(result == "unknown" && tx.walletAddress == wallet.address) result = burnNonce(confirmations, txs)
-//          cleanUpBatch(result)
-
-
-
-// sendSingleTx(calls)
-//   id = add db.publishedTxsTable
-//   for retries {
-//       result = sendRawTx(id, confirmations, txs, newTx)
-//       if(result == "mined") return result
-//   }
-//   return burnNonce(confirmations, txs)
-
-// sendBatch(calls)
-//   tx = createTx(tx(calls))
-//   transaction {
-//     insertTxSender()
-//     insert db.sentCallsTable
-//     insert db.sentCallsContentTable
-//   }
-//   for retries {
-//       transaction {
-//         insertTx()
-//         insert db.sentCallsTxsTable
-//       }
-//       result = sendRawTx(id, confirmations, txs, newTx)
-//       if(result == "mined") return result
-//       tx = createTx(tx(calls))
-//   }
-//   return burnNonce(confirmations, txs)
-
-
-
-//  sendTx(retries, txs, newTx)
-//     transaction {
-//       insertTxSender()
-//     }
-//      for retries {
-//           transaction {
-//             insertTx()
-//           }
-//          result = sendRawTx(confirmations, txs, newTx)
-//          if(result == "mined") return result
-//      }
-//      return burnNonce(confirmations, txs)
-
-
-//  burnNonce(confirmations, txs):
-//     tx = createNonceBurnTx()
-//     sleep_time = 250ms // 0 0.25 0.5 1 2 4 8 16 32 64 128 256 512 1024 2048 4096 8192 16384 32768 60000
-//     while(true) {
-//         result = sendRawTx(txs, tx, confirmations)
-//         if(result == success) return result
-//         sleep(sleepTIme)
-//         sleepTIme = min(sleepTime * 2, 60_000)
-//     }
-
-
-//  sendRawTx(confirmations, txs, tx) -> "mined"(receipt) | "unknown" | "skipped" | "notEnoughFunds"
-//      newTxs = txs + tx
-//      send_raw_tx(tx)
-//      result = mineTxs(newTxs, confirmations)
-//      if(result != "unknown") db.tx.state = success
-//       return (newTxs, result)
-
-// insertTxSender(transaction, wallet)
-//   return insert transaction.db.txsSendersTable
-
-// createTx(txData, wallet, senderId, transaction)
-//   tx = createTx(txData)
-//   if(not enough funds) return (txs, "notEnoughFunds")
-//   tx = signTx(txData)
-
-// insertTx()
-//   return insert transaction.db.txsable
-
-//  // observe, catch nonce skip
-//  mineTxs([txHash], confirmations) -> "mined"(receipt) | "unknown" | "skipped"
-//      attempt = 0
-//      nonceInvalidSinceBlock = 0
-//      while(attempt++ < 10)
-//          for each txHash: { // iterate backwards as the newest ones are the most probable
-//              tx eth_getTransactionByHash(txHash)
-//              if tx && tx.blockNumber // mined
-//                  if tx.blockNumber + confirmations >= eth_blockHeight(): // confirmed
-//                      return "mined"(tx)
-//                  attempt = 0;
-//                  break;
-//              // otherwise: in the pool or unknown
-//          }
-//          if(wallet.nonce != txs.nonce) // an unknown TX showed up
-//              nonceInvalidSinceBlock = nonceInvalidSinceBlock || eth_blockHeight()
-//              if nonceInvalidSinceBlock + confirmations >= eth_blockHeight(): // confirmed
-//                  return "skipped"
-//              attempt = 0;
-//          sleep(block_time)
-//      return "unknown"
-
-
-
-
-//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-
-
-
-
-
-
 const wallets = getWallets();
 Object.values(wallets).forEach(runWalletWorker);
-
-// for (const wallet of Object.values(wallets)) {
-//   runWalletWorker(wallet)
-
-  // if(await wallet.getCode({ address: executorAddr })) continue;
-  // console.log("Deploying Executor for chain", wallet.chain.name);
-  // const txHash = await wallet.sendTransaction({
-  //   to: create2Factory,
-  //   data: concat([executorSalt, executorBytecode]),
-  // });
-  // console.log("TX hash", txHash);
-// }
-
-// RPC fail - retry
-// submitted / confirming (both success/revert) - wait
-// submitted, never mined - send same again, same nonce?
-// dropped, RPC doesn't know WDYM - send same again, same nonce? (what if 2 RPCs get the same thing? Same nonce too, pleasant race condition)
-// after X retries - consider failure, THEN WHAT? burn the nonce?
-//
-// put a TX hash in the DB BEFORE sending it
-// on startup, check TXs in db that are in-flight, restore observation
-//
-// loop(3 times?){
-//    estimate
-//    if(not enough funds): break;
-//    sign & submit
-//    burn_nonce = true
-//    if(mined): wait for confirmations
-//    if(mined, revert): wait for confirmations, failed
-//    if(unmined): continue loop
-//
-//    wait for mined one way or another
-//
-// }
-// if(burn_nonce) send_tx(nonce_burner)
-//
-//
-// in all RPC calls, do the retrials
 
 const sendSchema = z.object({
   calls: z.array(z.object({
@@ -629,7 +437,7 @@ const sequencesStatesArgSchema = z.object({
 async function parseJsonArg<S extends z.ZodTypeAny>(
   context: Context,
   schema: S,
-): z.infer<S> | undefined {
+): Promise<z.infer<S> | undefined> {
   try {
     return schema.parse(await context.request.body.json());
   } catch (error) {
@@ -646,7 +454,7 @@ router
     let arg = await parseJsonArg(context, sendSequencesArgSchema);
     if (arg === undefined) return;
 
-    const sequences = [];
+    const sequences: {id: string}[] = [];
     await db.transaction(async (tx) => {
       for (const { chainId, bursts } of arg.sequences) {
         const [{ sequenceId }] = await tx.insert(sequencesTable)
@@ -660,8 +468,8 @@ router
           await tx.insert(callsTable)
             .values(calls.map(({ target, calldata }) => ({
               burstId,
-              target: hexToBytes(target),
-              calldata: hexToBytes(calldata),
+              target: target,
+              calldata: calldata,
             })));
         }
       }

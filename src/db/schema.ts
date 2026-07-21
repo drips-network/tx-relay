@@ -70,7 +70,7 @@ export const txsTable = pgTable("txs", {
   txHash: bytea().unique(),
   txSenderId: integer().notNull().references(() => txSendersTable.id),
   txPayloadId: integer().notNull().references(() => txPayloadsTable.id),
-  state: burstStateEnum().notNull().default("pending"),
+  state: txStateEnum().notNull().default("pending"),
   // receipt: logs? gas price? gas used? cost?
 });
 
