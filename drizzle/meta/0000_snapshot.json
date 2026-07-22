@@ -1,11 +1,11 @@
 {
-  "id": "4bf95bde-3e7b-4332-888d-f0adbf55c4fb",
+  "id": "5b7d29fd-a946-407a-87b6-00dc1b95602a",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
-    "public.batch_calls": {
-      "name": "batch_calls",
+    "public.batch_bursts": {
+      "name": "batch_bursts",
       "schema": "",
       "columns": {
         "id": {
@@ -15,7 +15,7 @@
           "notNull": true,
           "identity": {
             "type": "always",
-            "name": "batch_calls_id_seq",
+            "name": "batch_bursts_id_seq",
             "schema": "public",
             "increment": "1",
             "startWith": "1",
@@ -31,8 +31,8 @@
           "primaryKey": false,
           "notNull": true
         },
-        "call_id": {
-          "name": "call_id",
+        "burst_id": {
+          "name": "burst_id",
           "type": "integer",
           "primaryKey": false,
           "notNull": true
@@ -40,9 +40,9 @@
       },
       "indexes": {},
       "foreignKeys": {
-        "batch_calls_batch_id_batches_id_fk": {
-          "name": "batch_calls_batch_id_batches_id_fk",
-          "tableFrom": "batch_calls",
+        "batch_bursts_batch_id_batches_id_fk": {
+          "name": "batch_bursts_batch_id_batches_id_fk",
+          "tableFrom": "batch_bursts",
           "tableTo": "batches",
           "columnsFrom": [
             "batch_id"
@@ -53,67 +53,15 @@
           "onDelete": "no action",
           "onUpdate": "no action"
         },
-        "batch_calls_call_id_calls_id_fk": {
-          "name": "batch_calls_call_id_calls_id_fk",
-          "tableFrom": "batch_calls",
-          "tableTo": "calls",
+        "batch_bursts_burst_id_bursts_id_fk": {
+          "name": "batch_bursts_burst_id_bursts_id_fk",
+          "tableFrom": "batch_bursts",
+          "tableTo": "bursts",
           "columnsFrom": [
-            "call_id"
+            "burst_id"
           ],
           "columnsTo": [
             "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.batch_txs": {
-      "name": "batch_txs",
-      "schema": "",
-      "columns": {
-        "batch_id": {
-          "name": "batch_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "tx_hash": {
-          "name": "tx_hash",
-          "type": "bytea",
-          "primaryKey": false,
-          "notNull": true
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "batch_txs_batch_id_batches_id_fk": {
-          "name": "batch_txs_batch_id_batches_id_fk",
-          "tableFrom": "batch_txs",
-          "tableTo": "batches",
-          "columnsFrom": [
-            "batch_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
-        "batch_txs_tx_hash_txs_tx_hash_fk": {
-          "name": "batch_txs_tx_hash_txs_tx_hash_fk",
-          "tableFrom": "batch_txs",
-          "tableTo": "txs",
-          "columnsFrom": [
-            "tx_hash"
-          ],
-          "columnsTo": [
-            "tx_hash"
           ],
           "onDelete": "no action",
           "onUpdate": "no action"
@@ -145,10 +93,49 @@
             "cache": "1",
             "cycle": false
           }
+        },
+        "call_id": {
+          "name": "call_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "tx_payload_id": {
+          "name": "tx_payload_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
         }
       },
       "indexes": {},
-      "foreignKeys": {},
+      "foreignKeys": {
+        "batches_call_id_calls_id_fk": {
+          "name": "batches_call_id_calls_id_fk",
+          "tableFrom": "batches",
+          "tableTo": "calls",
+          "columnsFrom": [
+            "call_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "batches_tx_payload_id_tx_payloads_id_fk": {
+          "name": "batches_tx_payload_id_tx_payloads_id_fk",
+          "tableFrom": "batches",
+          "tableTo": "tx_payloads",
+          "columnsFrom": [
+            "tx_payload_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
@@ -364,6 +351,56 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.tx_payloads": {
+      "name": "tx_payloads",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "identity": {
+            "type": "always",
+            "name": "tx_payloads_id_seq",
+            "schema": "public",
+            "increment": "1",
+            "startWith": "1",
+            "minValue": "1",
+            "maxValue": "2147483647",
+            "cache": "1",
+            "cycle": false
+          }
+        },
+        "target": {
+          "name": "target",
+          "type": "bytea",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "calldata": {
+          "name": "calldata",
+          "type": "bytea",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0x'"
+        },
+        "value": {
+          "name": "value",
+          "type": "numeric(78, 0)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "0"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.tx_senders": {
       "name": "tx_senders",
       "schema": "",
@@ -407,7 +444,17 @@
       "indexes": {},
       "foreignKeys": {},
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
+      "uniqueConstraints": {
+        "tx_senders_address_nonce_chainId_unique": {
+          "name": "tx_senders_address_nonce_chainId_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "address",
+            "nonce",
+            "chain_id"
+          ]
+        }
+      },
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false
@@ -416,21 +463,44 @@
       "name": "txs",
       "schema": "",
       "columns": {
+        "id": {
+          "name": "id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "identity": {
+            "type": "always",
+            "name": "txs_id_seq",
+            "schema": "public",
+            "increment": "1",
+            "startWith": "1",
+            "minValue": "1",
+            "maxValue": "2147483647",
+            "cache": "1",
+            "cycle": false
+          }
+        },
         "tx_hash": {
           "name": "tx_hash",
           "type": "bytea",
-          "primaryKey": true,
+          "primaryKey": false,
+          "notNull": false
+        },
+        "tx_sender_id": {
+          "name": "tx_sender_id",
+          "type": "integer",
+          "primaryKey": false,
           "notNull": true
         },
-        "txs_sender_id": {
-          "name": "txs_sender_id",
+        "tx_payload_id": {
+          "name": "tx_payload_id",
           "type": "integer",
           "primaryKey": false,
           "notNull": true
         },
         "state": {
           "name": "state",
-          "type": "burst_state",
+          "type": "tx_state",
           "typeSchema": "public",
           "primaryKey": false,
           "notNull": true,
@@ -439,12 +509,25 @@
       },
       "indexes": {},
       "foreignKeys": {
-        "txs_txs_sender_id_tx_senders_id_fk": {
-          "name": "txs_txs_sender_id_tx_senders_id_fk",
+        "txs_tx_sender_id_tx_senders_id_fk": {
+          "name": "txs_tx_sender_id_tx_senders_id_fk",
           "tableFrom": "txs",
           "tableTo": "tx_senders",
           "columnsFrom": [
-            "txs_sender_id"
+            "tx_sender_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "txs_tx_payload_id_tx_payloads_id_fk": {
+          "name": "txs_tx_payload_id_tx_payloads_id_fk",
+          "tableFrom": "txs",
+          "tableTo": "tx_payloads",
+          "columnsFrom": [
+            "tx_payload_id"
           ],
           "columnsTo": [
             "id"
@@ -454,7 +537,15 @@
         }
       },
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
+      "uniqueConstraints": {
+        "txs_txHash_unique": {
+          "name": "txs_txHash_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "tx_hash"
+          ]
+        }
+      },
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false

@@ -46,8 +46,6 @@ export const callsTable = pgTable("calls", {
   calldata: bytea().notNull(),
 });
 
-
-
 // Added by prepareTx
 
 // initTxSender?            restoreTxs - mark done?
@@ -78,9 +76,8 @@ export const txPayloadsTable = pgTable("tx_payloads", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
   target: bytea().notNull(),
   calldata: bytea().notNull().default("0x"),
-  value: numeric({precision: 78, scale: 0, mode: "bigint"}).notNull().default(BigInt(0)),
+  value: numeric({ precision: 78, scale: 0, mode: "bigint" }).notNull().default(sql`0`),
 });
-
 
 // Added by sendbatch
 
@@ -90,17 +87,11 @@ export const batchesTable = pgTable("batches", {
   txPayloadId: integer().notNull().references(() => txPayloadsTable.id),
 });
 
-
 export const batchBurstsTable = pgTable("batch_bursts", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
   batchId: integer().notNull().references(() => batchesTable.id),
   burstId: integer().notNull().references(() => burstsTable.id),
 });
-
-
-
-
-
 
 // call[] -> burst
 // burst -> tx[]
@@ -109,6 +100,5 @@ export const batchBurstsTable = pgTable("batch_bursts", {
 // call[] -> burst => sendburst
 // tx -> sender => sendburst => prepareTx
 // burst -> tx => sendburst
-
 
 // tx -> sender =>
