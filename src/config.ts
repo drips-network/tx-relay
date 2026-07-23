@@ -51,7 +51,7 @@ const configSchema = z.object({
   wallets: z.array(z.object({
     chains: z.array(z.object({
       chainId: z.number(),
-      confirmations: z.bigint().default(1n),
+      confirmations: z.number().default(1).transform(BigInt),
     })),
     privateKey: z.string(),
   })).default([]),
