@@ -21,10 +21,10 @@ import {
 
 //------------------------------------------------
 //
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, min, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
-import { AsyncLocalStorage } from 'node:async_hooks';
+import { AsyncLocalStorage } from "node:async_hooks";
 // import { usersTable } from "./db/schema.ts";
 import {
   batchBurstsTable,
@@ -54,6 +54,7 @@ await migrate(db, { migrationsFolder: "./drizzle" });
 // db.query.
 
 import executorOutputJson from "./Executor.generated.json" with { type: "json" };
+import { it } from "zod/v4/locales";
 const executorAbi: Abi = executorOutputJson.abi as Abi;
 const executorBytecode: Hex = executorOutputJson.bytecode.object as Hex;
 
@@ -66,7 +67,7 @@ const executorAddr = getContractAddress({
   salt: executorSalt,
 });
 
-const workerContext = new AsyncLocalStorage<{wallet: Wallet}>();
+const workerContext = new AsyncLocalStorage<{ wallet: Wallet }>();
 
 const getWallet = () => workerContext.getStore()!.wallet;
 
@@ -79,7 +80,7 @@ type Tasks = Task[] | Task | undefined;
 type Task = () => Promise<Tasks>;
 
 function runWalletWorker(wallet: Wallet) {
-  workerContext.run({wallet}, async () =>{
+  workerContext.run({ wallet }, async () => {
     log("Worker started");
     const tasks: Task[] = [initRelay];
     while (tasks.length) {
@@ -87,21 +88,81 @@ function runWalletWorker(wallet: Wallet) {
       tasks.push(...[newTasks ?? []].flat().reverse());
     }
     log("Worker stopped");
-  }).catch(error => log("Worker crashed with error:", error));
+  }).catch((error) => log("Worker crashed with error:", error));
 }
 
 async function initRelay(): Promise<Tasks> {
   const isExecutorDeployed = () => getWallet().getCode({ address: executorAddr });
-  if (await isExecutorDeployed()) return runRelay;
+  if (await isExecutorDeployed()) return cleanUpPendingTxs;
   return [
     // Deploy the executor
     () => sendTx({ target: singletonFactory, calldata: concat([executorSalt, executorBytecode]) }),
     // Re-check if the executor is deployed, and starve the worker if not
     async () => {
-      if (await isExecutorDeployed()) return runRelay;
+      if (await isExecutorDeployed()) return cleanUpPendingTxs;
       else log("Failed to deploy the executor");
     },
   ];
+}
+
+async function cleanUpPendingTxs(): Promise<Tasks> {
+  const wallet = getWallet();
+  const senderIdQuery = db.select({ id: min(txSendersTable.id) })
+    .from(txSendersTable)
+    .innerJoin(txsTable, eq(txsTable.txSenderId, txSendersTable.id))
+    .where(and(
+      eq(txSendersTable.chainId, wallet.chain.id),
+      eq(txsTable.state, "pending"),
+    ));
+  const txSender = await db.select({
+    txSenderId: txSendersTable.id,
+    senderAddr: txSendersTable.address,
+    nonce: txSendersTable.nonce,
+  })
+    .from(txSendersTable)
+    .where(eq(txSendersTable.id, senderIdQuery));
+  // No more pending transactions, run the relay
+  if (!txSender.length) return runRelay;
+  const [{ txSenderId, senderAddr, nonce }] = txSender;
+
+  const txs = await db.select({ txHash: txsTable.txHash })
+    .from(txsTable)
+    .where(eq(txsTable.txSenderId, txSenderId))
+    .orderBy(txsTable.id);
+  const pendingTxs = txs.map(({ txHash }) => txHash!);
+
+  const onPending = senderAddr === wallet.account.address
+    // Any transactions still pending are probably outdated. Burn the nonce to prevent mining them.
+    ? () => burnNonce({ pendingTxs, txSenderId, nonce })
+    // The nonce can't be burned. Assume that the transactions are forgotten and won't be mined.
+    : () => skipTx(txSenderId);
+  return [
+    () => watchTxs({pendingTxs, txSenderId, nonce, onPending}),
+    cleanUpPendingTxs
+  ];
+
+  // { pendingTxs, txSenderId, nonce, onPending }: {
+  //   pendingTxs: Hex[];
+  //   txSenderId: number;
+  //   nonce: number;
+  //   onPending: Task;
+  // }
+
+  // txHashes = txs.map(({txHash}) => txHash)
+  //   return [
+  //     () =>
+  //     restoreTxs
+  //   ]
+  // }
+
+  // db.select()
+  // - fetch all from txsTable for sender ID
+  //     where senderId is min senderID on the current chain
+  //        where exists TX with state is pending and the
+  //    sorted by tx ID
+  // - watch TXs
+  //      if the wallet is the same, onPending = burn
+  //      else onPending = skipTx(txSenderId)
 }
 
 async function runRelay(): Promise<Tasks> {
@@ -111,9 +172,14 @@ async function runRelay(): Promise<Tasks> {
   }
 }
 
+// - OSS AI orchestration - is experimenting with it
+//   - there's Open Hands - not so good
+//   - more fast, crappy code
+//   - Currently in JS, should be RUST?
+
 // v log in terminal
 // v run it once
-// - restore in-flight TXs
+// v restore in-flight TXs
 // - log for bursts in DB
 // - fetch calls from DB and publish them all
 // - add tests?
@@ -243,7 +309,7 @@ async function burnNonce(
   });
 
   pendingTxs.push(keccak256(signedTx));
-   // TODO errors (not enough funds / used up nonce)
+  // TODO errors (not enough funds / used up nonce)
   // TODO when not enough funds: if pendingTxs - burn nonce, if !pendingTxs || burning - wait for funds
   await wallet.sendRawTransaction({ serializedTransaction: signedTx });
 
@@ -353,7 +419,7 @@ async function finalizeTxs(txSenderId: number, receipt: TransactionReceipt) {
   });
 }
 
-async function skipTx(txSenderId: number) {
+async function skipTx(txSenderId: number): Promise<undefined> {
   log("Skipping transaction");
   await db.update(txsTable).set({ state: "skipped" }).where(eq(txsTable.txSenderId, txSenderId));
 }
