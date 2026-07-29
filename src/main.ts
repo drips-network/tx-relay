@@ -4,9 +4,13 @@ import { z } from "zod";
 import {
   Abi,
   Address,
+  BaseError,
   concat,
   decodeEventLog,
   type DecodeEventLogReturnType,
+  ExecutionRevertedError,
+  FeeCapTooLowError,
+  FeeValues,
   getAddress,
   getContractAddress,
   Hex,
@@ -14,6 +18,8 @@ import {
   isAddress,
   isHex,
   keccak256,
+  NonceTooHighError,
+  NonceTooLowError,
   pad,
   stringToHex,
   TransactionReceipt,
@@ -180,8 +186,9 @@ async function runRelay(): Promise<Tasks> {
 // v log in terminal
 // v run it once
 // v restore in-flight TXs
-// - log for bursts in DB
+// - handle out-of-funds
 // - fetch calls from DB and publish them all
+// - log for bursts in DB
 // - add tests?
 // - handle the client errors
 // - more errors handling
@@ -225,12 +232,28 @@ async function sendTx(
     });
 }
 
+function increasedFees(fees: FeeValues, lastFees?: FeeValues): FeeValues {
+  const increasePercent = 10n; // TODO take increase from wallet
+  const increaseFee = (fee?: bigint, lastFee?: bigint): bigint | undefined => {
+    if(fee === undefined || lastFee === undefined) return fee;
+    const minFee = lastFee * (100n + increasePercent) / 100n + 1n;
+    return fee > minFee ? fee : minFee;
+  };
+  return {
+    gasPrice: increaseFee(fees.gasPrice, lastFees?.gasPrice),
+    maxFeePerBlobGas: increaseFee(fees.maxFeePerBlobGas, lastFees?.maxFeePerBlobGas),
+    maxFeePerGas: increaseFee(fees.maxFeePerGas, lastFees?.maxFeePerGas),
+    maxPriorityFeePerGas: increaseFee(fees.maxPriorityFeePerGas, lastFees?.maxPriorityFeePerGas),
+  } as FeeValues;
+}
+
 async function sendTxAttempt(
-  { retries, pendingTxs, txSenderId, nonce, txPayloadId, target, calldata, value }: {
+  { retries, pendingTxs, txSenderId, nonce, lastFees, txPayloadId, target, calldata, value }: {
     retries: number;
     pendingTxs: Hex[];
     txSenderId: number;
     nonce: number;
+    lastFees?: FeeValues,
     txPayloadId: number;
     target: Address;
     calldata?: Hex;
@@ -238,40 +261,55 @@ async function sendTxAttempt(
   },
 ): Promise<Tasks> {
   log("Attempting to send a transaction to", target, "with", retries, "retries left");
-  const onPending = () =>
-    retries
-      ? sendTxAttempt({
-        retries: retries - 1,
-        pendingTxs,
-        txSenderId,
-        nonce,
-        txPayloadId,
-        target,
-        calldata,
-        value,
-      })
-      : burnNonce({ pendingTxs, txSenderId, nonce });
 
   // TODO deduplicate probably vvvvvvv
   const wallet = getWallet();
-  if (nonce !== await wallet.getTransactionCount({ address: wallet.account.address })) {
-    return () => watchTxs({ pendingTxs, txSenderId, nonce, onPending });
-  }
   const request = await wallet.prepareTransactionRequest({
     to: target,
     data: calldata,
     value,
     nonce,
   });
+  const fees = increasedFees(request, lastFees);
+  Object.assign(request, fees);
+
   // TODO when not enough funds: if pendingTxs - burn nonce, if !pendingTxs || burning - wait for funds
   const signedTx = await wallet.signTransaction(request);
+  pendingTxs.push(keccak256(signedTx));
 
   await db.insert(txsTable).values({ txHash: keccak256(signedTx), txSenderId, txPayloadId });
 
-  pendingTxs.push(keccak256(signedTx));
-  await wallet.sendRawTransaction({ serializedTransaction: signedTx }); // TODO errors
+  const burnNonceTask = () => burnNonce({ pendingTxs, txSenderId, nonce, lastFees: fees });
+  const sendAgainTask =
+    retries
+      ? () => sendTxAttempt({
+        retries: retries - 1,
+        pendingTxs,
+        txSenderId,
+        nonce,
+        lastFees: fees,
+        txPayloadId,
+        target,
+        calldata,
+        value,
+      })
+      : burnNonceTask;
 
-  return () => watchTxs({ pendingTxs, nonce, txSenderId, onPending });
+  try {
+    await wallet.sendRawTransaction({ serializedTransaction: signedTx });
+  } catch (error) {
+    if (!(error instanceof BaseError)) throw error;
+    if (error.walk(e => e instanceof ExecutionRevertedError)) {
+      return burnNonceTask;
+    } else if (error.walk(e => e instanceof FeeCapTooLowError)) {
+      return sendAgainTask;
+    } else if (error.walk(e => e instanceof NonceTooLowError)) {
+    } else {
+      throw error;
+    }
+  }
+
+  return () => watchTxs({ pendingTxs, nonce, txSenderId, onPending: sendAgainTask });
   // TODO deduplicate probably ^^^^^^^
 }
 
@@ -284,6 +322,7 @@ async function burnNonce(
   { pendingTxs, txSenderId, nonce, delayMs }: {
     pendingTxs: Hex[];
     txSenderId: number;
+    lastFees?: FeeValues,
     nonce: number;
     delayMs?: number;
   },
