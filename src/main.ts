@@ -14,14 +14,16 @@ import {
   getAddress,
   getContractAddress,
   Hex,
-  hexToBytes, InsufficientFundsError,
+  hexToBytes,
+  InsufficientFundsError,
   isAddress,
   isHex,
   keccak256,
   NonceTooHighError,
   NonceTooLowError,
   pad,
-  stringToHex, toHex,
+  stringToHex,
+  toHex,
   TransactionReceipt,
 } from "viem";
 
@@ -76,19 +78,29 @@ type PendingTxs = {
   txSenderId: number;
   nonce: number;
   txHashes: Hex[];
-  lastFees?: FeeValues,
-  txPayloadId: number;
-  target: Address;
-  calldata: Hex;
-  value: bigint;
+  lastFees?: FeeValues;
+  payload: {
+    txPayloadId: number;
+    target: Address;
+    calldata: Hex;
+    value: bigint;
+  };
 };
 
-const workerContext = new AsyncLocalStorage<{ wallet: Wallet, pendingTxs?: PendingTxs }>();
+// type NextPayload = {
+//   lastFees?: FeeValues,
+//   txPayloadId: number;
+//   target: Address;
+//   calldata: Hex;
+//   value: bigint;
+// };
+
+const workerContext = new AsyncLocalStorage<{ wallet: Wallet; pendingTxs?: PendingTxs }>();
 
 const getWallet = () => workerContext.getStore()!.wallet;
 const getPendingTxs = () => workerContext.getStore()!.pendingTxs;
-const setPendingTxs = (pendingTxs?: PendingTxs) => workerContext.getStore()!.pendingTxs = pendingTxs;
-
+const setPendingTxs = (pendingTxs?: PendingTxs) =>
+  workerContext.getStore()!.pendingTxs = pendingTxs;
 
 function log(...message: unknown[]) {
   const worker = workerContext.getStore()?.wallet.chain.name ?? "main";
@@ -153,18 +165,13 @@ async function cleanUpPendingTxs(): Promise<Tasks> {
     txSenderId,
     nonce,
     txHashes: txs.map(({ txHash }) => txHash!),
-    txPayloadId: burnTxPayloadId,
-    target: burnTarget,
-    calldata: toHex(''),
-    value: 0n,
+    payload: burnPayload
   });
 
-  const onPending = senderAddr === wallet.account.address
-    // Any transactions still pending are probably outdated. Burn the nonce to prevent mining them.
-    ? burnNonce
-    // The nonce can't be burned. Assume that the transactions are forgotten and won't be mined.
-    : () => skipTx();
-  return [() => watchTxs({onPending}), cleanUpPendingTxs];
+  // Any transactions still pending are probably outdated. Burn the nonce to prevent mining them.
+  // If the nonce can't be burned, assume that the transactions are forgotten and won't be mined.
+  const onPending = senderAddr === wallet.account.address ? burnNonce : skipTx;
+  return [() => watchTxs({ onPending }), cleanUpPendingTxs];
 }
 
 async function runRelay(): Promise<Tasks> {
@@ -193,7 +200,7 @@ async function runRelay(): Promise<Tasks> {
 // - build batches
 
 async function sendTx(
-  { target, calldata = toHex(''), value = 0n }: {
+  { target, calldata = toHex(""), value = 0n }: {
     target: Address;
     calldata?: Hex;
     value?: bigint;
@@ -215,22 +222,36 @@ async function sendTx(
       ),
     );
   const [{ txPayloadId }] = await db.insert(txPayloadsTable)
-    .values({ target, calldata }).returning({ txPayloadId: txPayloadsTable.id });
+    .values({ target, calldata, value }).returning({ txPayloadId: txPayloadsTable.id });
 
-  setPendingTxs({ txSenderId, nonce, txHashes: [], txPayloadId, target, calldata, value });
+  setPendingTxs({ txSenderId, nonce, txHashes: [], payload: {txPayloadId, target, calldata, value }});
 
-  return () => sendTxAttempt(2);
+  return sendTxAttempt();
 }
 
-function txCost({ value, gas, gasPrice, maxFeePerGas }: {value?: bigint;gas?: bigint;gasPrice?: bigint;maxFeePerGas?: bigint;}): bigint {
+function sendTxAttempt(): Promise<Tasks> {
+  console.log("")
+  // Try to send 3 times, then burn nonce
+  const retryTask = getPendingTxs()!.txHashes.length < 2 ? sendTxAttempt : burnNonce;
+  return sendTxRaw(retryTask);
+}
+
+function txCost(
+  { value, gas, gasPrice, maxFeePerGas }: {
+    value?: bigint;
+    gas?: bigint;
+    gasPrice?: bigint;
+    maxFeePerGas?: bigint;
+  },
+): bigint {
   return (value ?? 0n) + (gas ?? 0n) * (maxFeePerGas ?? gasPrice ?? 0n);
 }
 
 function increasedFees(fees: FeeValues): FeeValues {
-  const {lastFees} = getPendingTxs()!;
+  const { lastFees } = getPendingTxs()!;
   const increasePercent = 10n; // TODO take increase from wallet
   const increaseFee = (fee?: bigint, lastFee?: bigint): bigint | undefined => {
-    if(fee === undefined || lastFee === undefined) return fee;
+    if (fee === undefined || lastFee === undefined) return fee;
     const minFee = lastFee * (100n + increasePercent) / 100n + 1n;
     return fee > minFee ? fee : minFee;
   };
@@ -242,110 +263,76 @@ function increasedFees(fees: FeeValues): FeeValues {
   } as FeeValues;
 }
 
-async function sendTxAttempt(retries: number): Promise<Tasks> {
-  const {txHashes, txSenderId, nonce, lastFees, txPayloadId, target, calldata, value } = getPendingTxs()!;
-
-  log("Attempting to send a transaction to", target, "with", retries, "retries left");
-
-  // TODO deduplicate probably vvvvvvv
-  const wallet = getWallet();
-  const request = await wallet.prepareTransactionRequest({
-    nonce,
-    to: target,
-    data: calldata,
-    value,
-  });
-  const fees = increasedFees(request);
-  Object.assign(request, fees);
-
-  // TODO when not enough funds: if pendingTxs - burn nonce, if !pendingTxs || burning - wait for funds
-  const signedTx = await wallet.signTransaction(request);
-  txHashes.push(keccak256(signedTx));
-  getPendingTxs()!.lastFees = fees;
-
-  await db.insert(txsTable).values({ txHash: keccak256(signedTx), txSenderId, txPayloadId });
-
-  const sendAgainTask = retries ? () => sendTxAttempt(retries - 1) : burnNonce;
-
-  try {
-    await wallet.sendRawTransaction({ serializedTransaction: signedTx });
-  } catch (error) {
-    if (!(error instanceof BaseError)) throw error;
-    if (error.walk(e => e instanceof ExecutionRevertedError)) return burnNonce;
-    else if (error.walk(e => e instanceof FeeCapTooLowError)) return sendAgainTask;
-    else if (error.walk(e => e instanceof NonceTooLowError)) {}
-    else if (error.walk(e => e instanceof InsufficientFundsError)) return [ burnNonce, () => waitForBalance(txCost(request)) ];
-    else {
-      throw error;
-    }
-  }
-
-  return () => watchTxs({ onPending: sendAgainTask });
-  // TODO deduplicate probably ^^^^^^^
-}
-
-const burnTarget: Address = getAddress(stringToHex("Nonce burning target"));
-const burnTxPayloadId: number = (await db.insert(txPayloadsTable)
-  .values({ target: burnTarget }).returning({ burnTxPayloadId: txPayloadsTable.id }))[0]
-  .burnTxPayloadId;
+const burnPayload = await (async () => {
+  const target = getAddress(stringToHex("Nonce burning target"));
+  const calldata = toHex("");
+  const value = 0n;
+  const insertedTxPayloads = await db.insert(txPayloadsTable)
+    .values({ target, calldata, value }).returning({ txPayloadId: txPayloadsTable.id });
+  const txPayloadId = insertedTxPayloads[0].txPayloadId;
+  return { txPayloadId, target, calldata, value };
+})();
 
 async function burnNonce(delayMs?: number): Promise<Tasks> {
-  const {txHashes, txSenderId, nonce } = getPendingTxs()!;
-  log("Burning nonce", nonce);
+  getPendingTxs()!.payload = burnPayload;
+
+  log("Burning nonce", getPendingTxs()!.nonce);
   if (!delayMs) delayMs = 1_000;
   else {
     await delay(delayMs);
+    delayMs *= 10;
     const maxDelayMs = 60_000;
-    delayMs = Math.min(delayMs * 10, maxDelayMs);
-    // Stop requiring the fees to be always rising
-    if(delayMs === maxDelayMs) getPendingTxs()!.lastFees = undefined;
+    if (delayMs > maxDelayMs) {
+      delayMs = maxDelayMs;
+      // Break the perpetual fees incrase
+      delete getPendingTxs()!.lastFees;
+    }
   }
+  return sendTxRaw(burnNonce);
+}
 
-  // TODO deduplicate probably vvvvvvv
+async function sendTxRaw(retryTask: Task): Promise<Tasks> {
   const wallet = getWallet();
-  const request = await wallet.prepareTransactionRequest({ to: burnTarget, nonce });
+  const { txHashes, txSenderId, nonce } = getPendingTxs()!;
+  const { txPayloadId, target, calldata, value } = getPendingTxs()!.payload;
+  log("Attempting to send a transaction to", target);
+  const request = await wallet.prepareTransactionRequest(
+    { nonce, to: target, data: calldata, value },
+  );
+
   const fees = increasedFees(request);
   Object.assign(request, fees);
+  getPendingTxs()!.lastFees = fees;
 
   const signedTx = await wallet.signTransaction(request);
   txHashes.push(keccak256(signedTx));
-  Object.assign(getPendingTxs()!, {
-    lastFees: fees,
-    txPayloadId: burnTxPayloadId,
-    target: burnTarget,
-    calldata: toHex(''),
-    value: 0n,
-  });
-
-  const txPayloadId = burnTxPayloadId;
-  await db.insert(txsTable).values({  txHash: keccak256(signedTx),  txSenderId,  txPayloadId });
-
-  const burnNonceTask = () => burnNonce(delayMs);
-  const sendAgainTask = burnNonceTask;
+  await db.insert(txsTable).values({ txHash: keccak256(signedTx), txSenderId, txPayloadId });
 
   try {
     await wallet.sendRawTransaction({ serializedTransaction: signedTx });
   } catch (error) {
     if (!(error instanceof BaseError)) throw error;
-    if (error.walk(e => e instanceof ExecutionRevertedError)) return burnNonceTask;
-    else if (error.walk(e => e instanceof FeeCapTooLowError)) return sendAgainTask;
-    else if (error.walk(e => e instanceof NonceTooLowError)) {}
-    else if (error.walk(e => e instanceof InsufficientFundsError))
+    if (error.walk((e) => e instanceof ExecutionRevertedError)) return burnNonce;
+    else if (error.walk((e) => e instanceof FeeCapTooLowError)) return retryTask;
+    else if (error.walk((e) => e instanceof NonceTooLowError)) { /* Continue normally */ }
+    else if (error.walk((e) => e instanceof InsufficientFundsError)) {
       return () => waitForBalance(txCost(request));
-    else throw error;
+    } else {
+      throw error;
+    }
   }
-
-  return () => watchTxs({ onPending: sendAgainTask });
-  // TODO deduplicate probably ^^^^^^^
+  return () => watchTxs({ onPending: retryTask });
 }
 
 async function waitForBalance(minBalance: bigint): Promise<Tasks> {
+  if(getPendingTxs()?.payload !== burnPayload)
+    return [burnNonce, () => waitForBalance(minBalance)];
   const wallet = getWallet();
-  while(await wallet.getBalance({ address: wallet.account.address }) < minBalance) {
-    log("Waiting for balance to be over", minBalance, "for address", wallet.account.address);
+  while (await wallet.getBalance({ address: wallet.account.address }) < minBalance) {
+    log("Waiting for the balance to be at least", minBalance, "for wallet", wallet.account.address);
     await delay(10_000);
   }
-  if(getPendingTxs()) return watchTxs({ onPending: burnNonce });
+  if (getPendingTxs()) return watchTxs({ onPending: burnNonce });
 }
 
 async function watchTxs(
@@ -353,7 +340,7 @@ async function watchTxs(
     onPending: Task;
   },
 ): Promise<Tasks> {
-  const {txHashes, nonce } = getPendingTxs()!;
+  const { txHashes, nonce } = getPendingTxs()!;
   const wallet = getWallet();
   let skipOnBlock;
   for (let attempt = 0; true; attempt++) {
@@ -391,7 +378,7 @@ async function watchTxs(
 
 async function finalizeTxs(receipt: TransactionReceipt) {
   log("Finalizing transaction", receipt.transactionHash, "with status", receipt.status);
-  const {txSenderId} = getPendingTxs()!;
+  const { txSenderId } = getPendingTxs()!;
   setPendingTxs();
 
   await db.transaction(async (dbTx) => {
@@ -453,7 +440,7 @@ async function finalizeTxs(receipt: TransactionReceipt) {
 
 async function skipTx(): Promise<undefined> {
   log("Skipping transaction");
-  const {txSenderId} = getPendingTxs()!;
+  const { txSenderId } = getPendingTxs()!;
   setPendingTxs();
   await db.update(txsTable).set({ state: "skipped" }).where(eq(txsTable.txSenderId, txSenderId));
 }
