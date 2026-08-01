@@ -109,13 +109,13 @@ function getWallet(): Wallet {
 
 function getPendingTxs(): PendingTxs{
   const pendingTxs = getWorkerContext().pendingTxs;
-  if(!pendingTxs) throw Error("No pending TXs set");
+  if(!pendingTxs) throw Error("No pending TXs set in the context");
   return pendingTxs;
 }
 
 function setPendingTxs(pendingTxs?: PendingTxs) {
   const contextStore = getWorkerContext();
-  if(contextStore.pendingTxs) throw Error("Pending TXs already set");
+  if(contextStore.pendingTxs && pendingTxs) throw Error("Pending TXs already set in the context");
   contextStore.pendingTxs = pendingTxs;
 }
 
