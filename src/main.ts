@@ -7,6 +7,7 @@ import {
   BaseError,
   concat,
   decodeEventLog,
+  encodeFunctionData,
   ExecutionRevertedError,
   FeeCapTooLowError,
   FeeValues,
@@ -84,22 +85,13 @@ type PendingTxs = {
   };
 };
 
-// type NextPayload = {
-//   lastFees?: FeeValues,
-//   txPayloadId: number;
-//   target: Address;
-//   calldata: Hex;
-//   value: bigint;
-// };
-//
-
 type WorkerContext = { wallet: Wallet; pendingTxs?: PendingTxs };
 
 const workerContext = new AsyncLocalStorage<WorkerContext>();
 
 function getWorkerContext(): WorkerContext {
   const contextStore = workerContext.getStore();
-  if(!contextStore) throw Error("No context set");
+  if (!contextStore) throw Error("No context set");
   return contextStore;
 }
 
@@ -107,15 +99,15 @@ function getWallet(): Wallet {
   return getWorkerContext().wallet;
 }
 
-function getPendingTxs(): PendingTxs{
+function getPendingTxs(): PendingTxs {
   const pendingTxs = getWorkerContext().pendingTxs;
-  if(!pendingTxs) throw Error("No pending TXs set in the context");
+  if (!pendingTxs) throw Error("No pending TXs set in the context");
   return pendingTxs;
 }
 
 function setPendingTxs(pendingTxs?: PendingTxs) {
   const contextStore = getWorkerContext();
-  if(contextStore.pendingTxs && pendingTxs) throw Error("Pending TXs already set in the context");
+  if (contextStore.pendingTxs && pendingTxs) throw Error("Pending TXs already set in the context");
   contextStore.pendingTxs = pendingTxs;
 }
 
@@ -182,7 +174,7 @@ async function cleanUpPendingTxs(): Promise<Tasks> {
     txSenderId,
     nonce,
     txHashes: txs.map(({ txHash }) => txHash!),
-    nextPayload: burnPayload
+    nextPayload: burnPayload,
   });
 
   // Any transactions still pending are probably outdated. Burn the nonce to prevent mining them.
@@ -193,10 +185,47 @@ async function cleanUpPendingTxs(): Promise<Tasks> {
 
 async function runRelay(): Promise<Tasks> {
   while (true) {
-    log("Relay running...");
-    await delay(2_000);
+    const callRows = await db.select({
+      sequenceId: sequencesTable.id,
+      burstId: burstsTable.id,
+      target: callsTable.target,
+      calldata: callsTable.calldata,
+    })
+      .from(sequencesTable)
+      .innerJoin(burstsTable, eq(sequencesTable.id, burstsTable.sequenceId))
+      .innerJoin(callsTable, eq(burstsTable.id, callsTable.burstId))
+      .where(and(
+        eq(sequencesTable.chainId, getWallet().chain.id),
+        eq(burstsTable.state, "pending"),
+      ))
+      .orderBy(sequencesTable.id, burstsTable.id, callsTable.id);
+
+    const sequences: { gasLimit: bigint; bursts: { target: Address; data: Hex }[][] }[] = [];
+    let prevRow;
+    const gasLimit = 1_000_000_000n;
+    for (const row of callRows) {
+      if (row.sequenceId !== prevRow?.sequenceId) sequences.push({ gasLimit, bursts: [] });
+      if (row.burstId !== prevRow?.burstId) sequences.at(-1)!.bursts.push([]);
+      sequences.at(-1)!.bursts.at(-1)!.push({ target: row.target, data: row.calldata });
+      prevRow = row;
+    }
+    const calldata = encodeFunctionData({
+      abi: executorAbi,
+      functionName: "execSequences",
+      args: [sequences],
+    });
+
+
+    await delay(1_000);
   }
 }
+
+// async function runRelay(lastCheckTime: number = 0): Promise<Tasks> {
+//   const currCheckTime = Date.now();
+//   await delay(lastCheckTime + 1_000 - currCheckTime);
+
+//   return () => runRelay(currCheckTime);
+// }
 
 // - OSS AI orchestration - is experimenting with it
 //   - there's Open Hands - not so good
@@ -209,7 +238,7 @@ async function runRelay(): Promise<Tasks> {
 // v handle out-of-funds
 // v make the current batch a global context state
 // v unify burn and sendTxAttempt?
-// x fetch calls from DB and publish them all
+// - fetch calls from DB and publish them all
 // - build batches
 // - log for bursts in DB
 // - add tests?
@@ -241,13 +270,18 @@ async function sendTx(
   const [{ txPayloadId }] = await db.insert(txPayloadsTable)
     .values({ target, calldata, value }).returning({ txPayloadId: txPayloadsTable.id });
 
-  setPendingTxs({ txSenderId, nonce, txHashes: [], nextPayload: {txPayloadId, target, calldata, value }});
+  setPendingTxs({
+    txSenderId,
+    nonce,
+    txHashes: [],
+    nextPayload: { txPayloadId, target, calldata, value },
+  });
 
   return sendTxAttempt();
 }
 
 function sendTxAttempt(): Promise<Tasks> {
-  console.log("")
+  console.log("");
   // Try to send 3 times, then burn nonce
   const retryTask = getPendingTxs().txHashes.length < 2 ? sendTxAttempt : burnNonce;
   return sendTxRaw(retryTask);
@@ -310,7 +344,8 @@ async function burnNonce(delayMs?: number): Promise<Tasks> {
 
 async function sendTxRaw(retryTask: Task): Promise<Tasks> {
   const wallet = getWallet();
-  const { txHashes, txSenderId, nonce, nextPayload: { txPayloadId, target, calldata, value } } = getPendingTxs();
+  const { txHashes, txSenderId, nonce, nextPayload: { txPayloadId, target, calldata, value } } =
+    getPendingTxs();
   log("Attempting to send a transaction to", target);
   const request = await wallet.prepareTransactionRequest(
     { nonce, to: target, data: calldata, value },
@@ -341,8 +376,9 @@ async function sendTxRaw(retryTask: Task): Promise<Tasks> {
 }
 
 async function waitForBalance(minBalance: bigint): Promise<Tasks> {
-  if(getPendingTxs()?.nextPayload !== burnPayload)
+  if (getPendingTxs()?.nextPayload !== burnPayload) {
     return [burnNonce, () => waitForBalance(minBalance)];
+  }
   const wallet = getWallet();
   while (await wallet.getBalance({ address: wallet.account.address }) < minBalance) {
     log("Waiting for the balance to be at least", minBalance, "for wallet", wallet.account.address);

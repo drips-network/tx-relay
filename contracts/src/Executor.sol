@@ -10,7 +10,7 @@ struct Call {
 
 struct Sequence {
     uint256 gasLimit;
-    Call[][] batches;
+    Call[][] bursts;
 }
 
 struct Receipt {
@@ -19,12 +19,12 @@ struct Receipt {
 }
 
 contract Executor {
-    function execSequences(Sequence[] calldata bundle) external returns (Receipt[] memory receipts) {
-        receipts = new Receipt[](bundle.length);
-        for(uint256 i = 0; i < bundle.length; i++) {
-            Sequence calldata sequence = bundle[i];
+    function execSequences(Sequence[] calldata sequences) external returns (Receipt[] memory receipts) {
+        receipts = new Receipt[](sequences.length);
+        for(uint256 i = 0; i < sequences.length; i++) {
+            Sequence calldata sequence = sequences[i];
             uint256 gasLimit = sequence.gasLimit;
-            bytes memory args = abi.encodeCall(this.execBatches, (sequence.batches));
+            bytes memory args = abi.encodeCall(this.execBursts, (sequence.bursts));
 
             uint256 successes;
             uint256 gas = gasleft();
@@ -36,7 +36,7 @@ contract Executor {
                 // If there's a revert, the data is either an error payload or junk if no data is
                 // returned, in which case it's multiplied by 0 and always ends up as 0 successes.
                 // This is a branchless implementation preventing sequences' results
-                // from having any effect on gas usage of the bundle execution loop.
+                // from having any effect on gas usage of the sequences execution loop.
                 successes := mul(mload(0), success)
             }
             receipts[i] = Receipt({ successes: successes, gasUsed: gas - gasleft()});
@@ -45,14 +45,16 @@ contract Executor {
         return receipts;
     }
 
-    function execBatches(Call[][] calldata batches) external returns (uint256 successes){
+    function execBursts(Call[][] calldata bursts) external returns (uint256 successes){
+        // forge-lint: disable-next-line(unsafe-typecast)
         if(tx.origin == address(bytes20("Executor - drain gas")))
             assembly("memory-safe") { invalid() }
-        while(successes < batches.length) {
-            try this.execCalls(batches[successes]) {
+        while(successes < bursts.length) {
+            try this.execCalls(bursts[successes]) {
                 successes++;
             }
             catch(bytes memory) {
+                // forge-lint: disable-next-line(unsafe-typecast)
                 require(tx.origin != address(bytes20("Executor - no revert")));
                 break;
             }
