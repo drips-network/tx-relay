@@ -77,6 +77,7 @@ export const txPayloadsTable = pgTable("tx_payloads", {
   target: bytea().notNull(),
   calldata: bytea().notNull().default("0x"),
   value: numeric({ precision: 78, scale: 0, mode: "bigint" }).notNull().default(sql`0`),
+  gas: numeric({ precision: 78, scale: 0, mode: "bigint" }),
 });
 
 // Added by sendbatch

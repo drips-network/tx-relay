@@ -82,6 +82,7 @@ type PendingTxs = {
     target: Address;
     calldata: Hex;
     value: bigint;
+    gas?: bigint;
   };
 };
 
@@ -162,7 +163,7 @@ async function cleanUpPendingTxs(): Promise<Tasks> {
     .from(txSendersTable)
     .where(eq(txSendersTable.id, senderIdQuery));
   // No more pending transactions, run the relay
-  if (!txSender.length) return runRelay;
+  if (!txSender.length) return sendNextBath;
   const [{ txSenderId, senderAddr, nonce }] = txSender;
 
   const txs = await db.select({ txHash: txsTable.txHash })
@@ -183,7 +184,7 @@ async function cleanUpPendingTxs(): Promise<Tasks> {
   return [() => watchTxs({ onPending }), cleanUpPendingTxs];
 }
 
-async function runRelay(): Promise<Tasks> {
+async function sendNextBath(): Promise<Tasks> {
   while (true) {
     const callRows = await db.select({
       sequenceId: sequencesTable.id,
@@ -199,6 +200,10 @@ async function runRelay(): Promise<Tasks> {
         eq(burstsTable.state, "pending"),
       ))
       .orderBy(sequencesTable.id, burstsTable.id, callsTable.id);
+    if (!callRows.length) {
+      await delay(1_000);
+      continue;
+    }
 
     const sequences: { gasLimit: bigint; bursts: { target: Address; data: Hex }[][] }[] = [];
     let prevRow;
@@ -214,17 +219,18 @@ async function runRelay(): Promise<Tasks> {
       functionName: "execSequences",
       args: [sequences],
     });
-
-
-    await delay(1_000);
+    return [
+      () => sendTx({ target: executorAddr, calldata, gas: 1_000_000n }),
+      sendNextBath,
+    ];
   }
 }
 
-// async function runRelay(lastCheckTime: number = 0): Promise<Tasks> {
+// async function sendNextBath(lastCheckTime: number = 0): Promise<Tasks> {
 //   const currCheckTime = Date.now();
 //   await delay(lastCheckTime + 1_000 - currCheckTime);
 
-//   return () => runRelay(currCheckTime);
+//   return () => sendNextBath(currCheckTime);
 // }
 
 // - OSS AI orchestration - is experimenting with it
@@ -238,7 +244,7 @@ async function runRelay(): Promise<Tasks> {
 // v handle out-of-funds
 // v make the current batch a global context state
 // v unify burn and sendTxAttempt?
-// - fetch calls from DB and publish them all
+// v fetch calls from DB and publish them all
 // - build batches
 // - log for bursts in DB
 // - add tests?
@@ -246,10 +252,11 @@ async function runRelay(): Promise<Tasks> {
 // - more errors handling
 
 async function sendTx(
-  { target, calldata = toHex(""), value = 0n }: {
+  { target, calldata = toHex(""), value = 0n, gas }: {
     target: Address;
     calldata?: Hex;
     value?: bigint;
+    gas?: bigint;
   },
 ): Promise<Tasks> {
   log("Sending a transaction to", target);
@@ -268,13 +275,13 @@ async function sendTx(
       ),
     );
   const [{ txPayloadId }] = await db.insert(txPayloadsTable)
-    .values({ target, calldata, value }).returning({ txPayloadId: txPayloadsTable.id });
+    .values({ target, calldata, value, gas }).returning({ txPayloadId: txPayloadsTable.id });
 
   setPendingTxs({
     txSenderId,
     nonce,
     txHashes: [],
-    nextPayload: { txPayloadId, target, calldata, value },
+    nextPayload: { txPayloadId, target, calldata, value, gas },
   });
 
   return sendTxAttempt();
