@@ -19,6 +19,8 @@ const bytea = customType<{ data: Hex; driverData: Uint8Array }>({
   fromDriver: bytesToHex,
 });
 
+const uint256 = () => numeric({ precision: 78, scale: 0, mode: "bigint" });
+
 export const sequencesTable = pgTable("sequences", {
   id: uuid().primaryKey().default(sql`uuidv7()`),
   chainId: integer().notNull(),
@@ -76,8 +78,8 @@ export const txPayloadsTable = pgTable("tx_payloads", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
   target: bytea().notNull(),
   calldata: bytea().notNull().default("0x"),
-  value: numeric({ precision: 78, scale: 0, mode: "bigint" }).notNull().default(sql`0`),
-  gas: numeric({ precision: 78, scale: 0, mode: "bigint" }),
+  value: uint256().notNull().default(sql`0`),
+  gas: uint256(),
 });
 
 // Added by sendbatch

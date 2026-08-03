@@ -184,46 +184,44 @@ async function cleanUpPendingTxs(): Promise<Tasks> {
   return [() => watchTxs({ onPending }), cleanUpPendingTxs];
 }
 
-async function sendNextBath(): Promise<Tasks> {
-  while (true) {
-    const callRows = await db.select({
-      sequenceId: sequencesTable.id,
-      burstId: burstsTable.id,
-      target: callsTable.target,
-      calldata: callsTable.calldata,
-    })
-      .from(sequencesTable)
-      .innerJoin(burstsTable, eq(sequencesTable.id, burstsTable.sequenceId))
-      .innerJoin(callsTable, eq(burstsTable.id, callsTable.burstId))
-      .where(and(
-        eq(sequencesTable.chainId, getWallet().chain.id),
-        eq(burstsTable.state, "pending"),
-      ))
-      .orderBy(sequencesTable.id, burstsTable.id, callsTable.id);
-    if (!callRows.length) {
-      await delay(1_000);
-      continue;
-    }
+async function sendNextBath(lastCheckTime: number = 0): Promise<Tasks> {
+  await delay(lastCheckTime + 1_000 - Date.now());
+  const sendNextBatchTask = () => sendNextBath(Date.now());
 
-    const sequences: { gasLimit: bigint; bursts: { target: Address; data: Hex }[][] }[] = [];
-    let prevRow;
-    const gasLimit = 1_000_000_000n;
-    for (const row of callRows) {
-      if (row.sequenceId !== prevRow?.sequenceId) sequences.push({ gasLimit, bursts: [] });
-      if (row.burstId !== prevRow?.burstId) sequences.at(-1)!.bursts.push([]);
-      sequences.at(-1)!.bursts.at(-1)!.push({ target: row.target, data: row.calldata });
-      prevRow = row;
-    }
-    const calldata = encodeFunctionData({
-      abi: executorAbi,
-      functionName: "execSequences",
-      args: [sequences],
-    });
-    return [
-      () => sendTx({ target: executorAddr, calldata, gas: 1_000_000n }),
-      sendNextBath,
-    ];
+  const callRows = await db.select({
+    sequenceId: sequencesTable.id,
+    burstId: burstsTable.id,
+    target: callsTable.target,
+    calldata: callsTable.calldata,
+  })
+    .from(sequencesTable)
+    .innerJoin(burstsTable, eq(sequencesTable.id, burstsTable.sequenceId))
+    .innerJoin(callsTable, eq(burstsTable.id, callsTable.burstId))
+    .where(and(
+      eq(sequencesTable.chainId, getWallet().chain.id),
+      eq(burstsTable.state, "pending"),
+    ))
+    .orderBy(sequencesTable.id, burstsTable.id, callsTable.id);
+  if (!callRows.length) return sendNextBatchTask;
+
+  const sequences: { gasLimit: bigint; bursts: { target: Address; data: Hex }[][] }[] = [];
+  let prevRow;
+  const gasLimit = 1_000_000_000n;
+  for (const row of callRows) {
+    if (row.sequenceId !== prevRow?.sequenceId) sequences.push({ gasLimit, bursts: [] });
+    if (row.burstId !== prevRow?.burstId) sequences.at(-1)!.bursts.push([]);
+    sequences.at(-1)!.bursts.at(-1)!.push({ target: row.target, data: row.calldata });
+    prevRow = row;
   }
+  const calldata = encodeFunctionData({
+    abi: executorAbi,
+    functionName: "execSequences",
+    args: [sequences],
+  });
+  return [
+    () => sendTx({ target: executorAddr, calldata, gas: 1_000_000n }),
+    sendNextBatchTask,
+  ];
 }
 
 // async function sendNextBath(lastCheckTime: number = 0): Promise<Tasks> {
