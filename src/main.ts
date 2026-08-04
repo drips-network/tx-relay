@@ -28,16 +28,15 @@ import {
 //------------------------------------------------
 //
 import { and, eq, inArray, min, sql } from "drizzle-orm";
-import { drizzle } from "drizzle-orm/postgres-js";
+import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import { AsyncLocalStorage } from "node:async_hooks";
 // import { usersTable } from "./db/schema.ts";
 import {
-  batchBurstsTable,
-  batchesTable,
   burstsTable,
   callsTable,
   sequencesTable,
+  txPayloadBurstsTable,
   txPayloadsTable,
   txSendersTable,
   txsTable,
@@ -186,6 +185,7 @@ async function cleanUpPendingTxs(): Promise<Tasks> {
 
 async function sendNextBath(lastCheckTime: number = 0): Promise<Tasks> {
   await delay(lastCheckTime + 1_000 - Date.now());
+  log("Checking if a new batch needs to be sent");
   const sendNextBatchTask = () => sendNextBath(Date.now());
 
   const callRows = await db.select({
@@ -205,11 +205,15 @@ async function sendNextBath(lastCheckTime: number = 0): Promise<Tasks> {
   if (!callRows.length) return sendNextBatchTask;
 
   const sequences: { gasLimit: bigint; bursts: { target: Address; data: Hex }[][] }[] = [];
+  const burstIds: number[] = [];
   let prevRow;
   const gasLimit = 1_000_000_000n;
   for (const row of callRows) {
     if (row.sequenceId !== prevRow?.sequenceId) sequences.push({ gasLimit, bursts: [] });
-    if (row.burstId !== prevRow?.burstId) sequences.at(-1)!.bursts.push([]);
+    if (row.burstId !== prevRow?.burstId) {
+      sequences.at(-1)!.bursts.push([]);
+      burstIds.push(row.burstId);
+    }
     sequences.at(-1)!.bursts.at(-1)!.push({ target: row.target, data: row.calldata });
     prevRow = row;
   }
@@ -218,10 +222,20 @@ async function sendNextBath(lastCheckTime: number = 0): Promise<Tasks> {
     functionName: "execSequences",
     args: [sequences],
   });
-  return [
-    () => sendTx({ target: executorAddr, calldata, gas: 1_000_000n }),
-    sendNextBatchTask,
-  ];
+
+  const target = executorAddr;
+  const gas = 1_000_000n;
+
+  const wallet = getWallet();
+  const nonce = await wallet.getTransactionCount({ address: wallet.account.address });
+  await db.transaction(async (dbTx) => {
+    await registerPendingTx(dbTx, wallet, nonce, { target, calldata, gas });
+    const { txPayloadId } = getPendingTxs().nextPayload;
+    const txPayloadBursts = burstIds.map((burstId) => ({ burstId, txPayloadId }));
+    await dbTx.insert(txPayloadBurstsTable).values(txPayloadBursts);
+  });
+
+  return [sendTxAttempt, sendNextBatchTask];
 }
 
 // async function sendNextBath(lastCheckTime: number = 0): Promise<Tasks> {
@@ -250,39 +264,39 @@ async function sendNextBath(lastCheckTime: number = 0): Promise<Tasks> {
 // - more errors handling
 
 async function sendTx(
-  { target, calldata = toHex(""), value = 0n, gas }: {
+  payload: { target: Address; calldata?: Hex; value?: bigint; gas?: bigint },
+): Promise<Tasks> {
+  log("Sending a transaction to", payload.target);
+  const wallet = getWallet();
+  const nonce = await wallet.getTransactionCount({ address: wallet.account.address });
+  await db.transaction((dbTx) => registerPendingTx(dbTx, wallet, nonce, payload));
+  return sendTxAttempt();
+}
+
+async function registerPendingTx(
+  dbTx: PostgresJsDatabase,
+  wallet: Wallet,
+  nonce: number,
+  { target, calldata, value, gas }: {
     target: Address;
     calldata?: Hex;
     value?: bigint;
     gas?: bigint;
   },
-): Promise<Tasks> {
-  log("Sending a transaction to", target);
-  const wallet = getWallet();
-  const senderAddr = wallet.account.address;
-  const nonce = await wallet.getTransactionCount({ address: senderAddr });
+) {
+  const payload = { target, calldata: calldata ?? toHex(""), value: value ?? 0n, gas };
+  const address = wallet.account.address;
   const chainId = wallet.chain.id;
-
-  await db.insert(txSendersTable).values({ address: senderAddr, nonce, chainId })
-    .onConflictDoNothing();
-  const [{ txSenderId }] = await db.select({ txSenderId: txSendersTable.id }).from(txSendersTable)
-    .where(
-      and(
-        and(eq(txSendersTable.address, senderAddr), eq(txSendersTable.nonce, nonce)),
-        eq(txSendersTable.chainId, chainId),
-      ),
-    );
-  const [{ txPayloadId }] = await db.insert(txPayloadsTable)
-    .values({ target, calldata, value, gas }).returning({ txPayloadId: txPayloadsTable.id });
-
-  setPendingTxs({
-    txSenderId,
-    nonce,
-    txHashes: [],
-    nextPayload: { txPayloadId, target, calldata, value, gas },
-  });
-
-  return sendTxAttempt();
+  await dbTx.insert(txSendersTable).values({ address, nonce, chainId }).onConflictDoNothing();
+  const [{ txSenderId }] = await dbTx.select({ txSenderId: txSendersTable.id }).from(txSendersTable)
+    .where(and(
+      eq(txSendersTable.address, address),
+      eq(txSendersTable.nonce, nonce),
+      eq(txSendersTable.chainId, chainId),
+    ));
+  const [{ txPayloadId }] = await dbTx.insert(txPayloadsTable)
+    .values(payload).returning({ txPayloadId: txPayloadsTable.id });
+  setPendingTxs({ txSenderId, nonce, txHashes: [], nextPayload: { txPayloadId, ...payload } });
 }
 
 function sendTxAttempt(): Promise<Tasks> {
@@ -458,11 +472,11 @@ async function finalizeTxs(receipt: TransactionReceipt) {
       burstId: burstsTable.id,
     })
       .from(txsTable)
-      .innerJoin(batchesTable, eq(batchesTable.txPayloadId, txsTable.txPayloadId))
-      .innerJoin(batchBurstsTable, eq(batchBurstsTable.batchId, batchesTable.id))
-      .innerJoin(burstsTable, eq(burstsTable.id, batchBurstsTable.burstId))
+      .innerJoin(txPayloadBurstsTable, eq(txPayloadBurstsTable.txPayloadId, txsTable.txPayloadId))
+      .innerJoin(burstsTable, eq(burstsTable.id, txPayloadBurstsTable.burstId))
       .where(eq(txsTable.txHash, receipt.transactionHash))
-      .orderBy(batchBurstsTable.id);
+      .orderBy(txPayloadBurstsTable.id);
+    log("Got", executedBursts.length, "bursts finalized");
     if (!executedBursts.length) return;
 
     const { topics, data } = receipt.logs.at(-1)!;
@@ -592,7 +606,7 @@ router
       const state = statesById[id];
       return {
         id,
-        total: state.pending + state.successes + state.failures,
+        bursts: state.pending + state.successes + state.failures,
         successes: state.successes,
         isFailed: state.failures > 0,
       };

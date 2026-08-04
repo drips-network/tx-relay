@@ -84,15 +84,9 @@ export const txPayloadsTable = pgTable("tx_payloads", {
 
 // Added by sendbatch
 
-export const batchesTable = pgTable("batches", {
+export const txPayloadBurstsTable = pgTable("tx_payload_bursts", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
-  callId: integer().notNull().references(() => callsTable.id),
   txPayloadId: integer().notNull().references(() => txPayloadsTable.id),
-});
-
-export const batchBurstsTable = pgTable("batch_bursts", {
-  id: integer().primaryKey().generatedAlwaysAsIdentity(),
-  batchId: integer().notNull().references(() => batchesTable.id),
   burstId: integer().notNull().references(() => burstsTable.id),
 });
 
