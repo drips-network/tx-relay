@@ -1,70 +1,78 @@
 // SPDX-License-Identifier: GPL-3.0-only
 pragma solidity ^0.8.35;
 
-event Receipts(Receipt[] receipts);
+event Receipt(int256[] gasReport);
+
+struct Burst {
+    bool needsPrev;
+    uint256 gas;
+    Call[] calls;
+}
 
 struct Call {
     address target;
     bytes data;
-}
-
-struct Sequence {
-    uint256 gasLimit;
-    Call[][] bursts;
-}
-
-struct Receipt {
-    uint256 successes;
-    uint256 gasUsed;
+    uint256 gas;
 }
 
 contract Executor {
-    function execSequences(Sequence[] calldata sequences) external returns (Receipt[] memory receipts) {
-        receipts = new Receipt[](sequences.length);
-        for(uint256 i = 0; i < sequences.length; i++) {
-            Sequence calldata sequence = sequences[i];
-            uint256 gasLimit = sequence.gasLimit;
-            bytes memory args = abi.encodeCall(this.execBursts, (sequence.bursts));
+    function exec(Burst[] calldata bursts) public returns (int256[] memory gasReport) {
+        gasReport = new int256[](bursts.length + 1);
+        gasReport[0] = int256(gasleft());
+        for (uint256 idx = 0; idx < bursts.length;) {
+            Burst calldata burst = bursts[idx];
+            (bool success,) =
+                address(this).call{gas: burst.gas}(abi.encodeCall(this.execSingle, (burst.calls)));
 
-            uint256 successes;
-            uint256 gas = gasleft();
-            assembly ("memory-safe") {
-                let success := call(gasLimit, address(), 0, add(32, args), mload(args), 0, 32)
-                // The first 32 bytes of return data is written to memory starting from index 0.
-                // If there's a success, the data is the uint256 number of successes,
-                // which is multiplied by 1 and unchanged.
-                // If there's a revert, the data is either an error payload or junk if no data is
-                // returned, in which case it's multiplied by 0 and always ends up as 0 successes.
-                // This is a branchless implementation preventing sequences' results
-                // from having any effect on gas usage of the sequences execution loop.
-                successes := mul(mload(0), success)
+            // forge-lint: disable-next-line(unsafe-typecast)
+            if (tx.origin == address(bytes20("Executor - drain gas"))) {
+                // Assert that there was enough gas to cover the burst gas limit in full
+                require(gasleft() >= burst.gas / 64);
+                // Do not skip the next burst in the sequence
+                success = true;
             }
-            receipts[i] = Receipt({ successes: successes, gasUsed: gas - gasleft()});
+
+            uint256 nextIdx = idx + 1;
+            // On revert, skip all the bursts dependent on the failed burst
+            if (!success) while (nextIdx < bursts.length && bursts[nextIdx].needsPrev) nextIdx++;
+            int256 gas = int256(gasleft());
+            gasReport[idx + 1] = success ? gas : -gas;
+            idx = nextIdx;
         }
-        emit Receipts(receipts);
-        return receipts;
+        emit Receipt(gasReport);
     }
 
-    function execBursts(Call[][] calldata bursts) external returns (uint256 successes){
+    /// @param burstsGas The gas needed to execute `bursts`.
+    /// It must be at least the whole gas needed to call `exec`, including any leftover gas,
+    /// but it may exclude the TX overhead, e.g. the calldata cost.
+    function execNext(Burst[] calldata bursts, uint256 burstsGas, Call[] calldata nextBurstCalls)
+        external
+        returns (uint256 nextBurstGas)
+    {
+        // Assert that exec has as much gas as it requires.
+        uint256 gasAfter = gasleft() - burstsGas;
+        int256[] memory results = exec(bursts);
+        // Burn any possible leftover gas to avoid it overshadowing the next call's gas requirement.
+        while (gasleft() > gasAfter) continue;
+        for (uint256 i = 0; i < results.length; i++) {
+            require(results[i] > 0);
+        }
+        // Measure gas passed into the burst.
+        nextBurstGas = gasleft() * 63 / 64;
+        this.execSingle(nextBurstCalls);
+    }
+
+    function execSingle(Call[] calldata calls) external {
         // forge-lint: disable-next-line(unsafe-typecast)
-        if(tx.origin == address(bytes20("Executor - drain gas")))
-            assembly("memory-safe") { invalid() }
-        while(successes < bursts.length) {
-            try this.execCalls(bursts[successes]) {
-                successes++;
-            }
-            catch(bytes memory) {
-                // forge-lint: disable-next-line(unsafe-typecast)
-                require(tx.origin != address(bytes20("Executor - no revert")));
-                break;
-            }
+        if (tx.origin == address(bytes20("Executor - drain gas"))) {
+            // Burn all available gas and revert
+            assembly ("memory-safe") { invalid() }
         }
-    }
-
-    function execCalls(Call[] calldata calls) external {
-        for(uint256 i = 0; i < calls.length; i++) {
+        for (uint256 i = 0; i < calls.length; i++) {
             Call calldata call = calls[i];
-            (bool success,) = call.target.call(call.data);
+            uint256 gas = call.gas;
+            if (gas == 0) gas = gasleft();
+            (bool success,) = call.target.call{gas: gas}(call.data);
             require(success);
         }
     }

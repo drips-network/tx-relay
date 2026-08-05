@@ -19,7 +19,7 @@ import * as viemChains from "viem/chains";
 // DB URL configuration
 
 export function getDbUrl(): string {
-  return dbUrl ??= z.url().default("postgres://user:password@localhost:5432/relay_db")
+  return dbUrl ??= z.url().default("postgres://user:password@localhost:5432/tx_relay")
     .parse(Deno.env.get("DB_URL"));
 }
 

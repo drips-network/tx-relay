@@ -46,6 +46,7 @@ export const callsTable = pgTable("calls", {
   burstId: integer().notNull().references(() => burstsTable.id),
   target: bytea().notNull(),
   calldata: bytea().notNull(),
+  gas: uint256(),
 });
 
 // Added by prepareTx
@@ -64,14 +65,12 @@ export const txSendersTable = pgTable(
 
 export const txStateEnum = pgEnum("tx_state", ["pending", "success", "reverted", "skipped"]);
 
-// sendRawTx
 export const txsTable = pgTable("txs", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
   txHash: bytea().unique(),
   txSenderId: integer().notNull().references(() => txSendersTable.id),
   txPayloadId: integer().notNull().references(() => txPayloadsTable.id),
   state: txStateEnum().notNull().default("pending"),
-  // receipt: logs? gas price? gas used? cost?
 });
 
 export const txPayloadsTable = pgTable("tx_payloads", {
@@ -82,20 +81,9 @@ export const txPayloadsTable = pgTable("tx_payloads", {
   gas: uint256(),
 });
 
-// Added by sendbatch
-
 export const txPayloadBurstsTable = pgTable("tx_payload_bursts", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
   txPayloadId: integer().notNull().references(() => txPayloadsTable.id),
   burstId: integer().notNull().references(() => burstsTable.id),
+  inclusionGas: uint256(),
 });
-
-// call[] -> burst
-// burst -> tx[]
-// tx[] -> sender
-
-// call[] -> burst => sendburst
-// tx -> sender => sendburst => prepareTx
-// burst -> tx => sendburst
-
-// tx -> sender =>

@@ -1,5 +1,5 @@
 {
-  "id": "80c5194e-7fe9-4bf4-b50e-1207b2caafc0",
+  "id": "25ccbb20-65ef-415d-b5f3-20981db4a88b",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -163,6 +163,12 @@
           "type": "bytea",
           "primaryKey": false,
           "notNull": true
+        },
+        "gas": {
+          "name": "gas",
+          "type": "numeric(78, 0)",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {},
@@ -245,6 +251,12 @@
           "type": "integer",
           "primaryKey": false,
           "notNull": true
+        },
+        "inclusion_gas": {
+          "name": "inclusion_gas",
+          "type": "numeric(78, 0)",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {},

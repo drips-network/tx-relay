@@ -17,7 +17,8 @@ CREATE TABLE "calls" (
 	"id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "calls_id_seq" INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 START WITH 1 CACHE 1),
 	"burst_id" integer NOT NULL,
 	"target" "bytea" NOT NULL,
-	"calldata" "bytea" NOT NULL
+	"calldata" "bytea" NOT NULL,
+	"gas" numeric(78, 0)
 );
 --> statement-breakpoint
 CREATE TABLE "sequences" (
@@ -28,7 +29,8 @@ CREATE TABLE "sequences" (
 CREATE TABLE "tx_payload_bursts" (
 	"id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "tx_payload_bursts_id_seq" INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 START WITH 1 CACHE 1),
 	"tx_payload_id" integer NOT NULL,
-	"burst_id" integer NOT NULL
+	"burst_id" integer NOT NULL,
+	"inclusion_gas" numeric(78, 0)
 );
 --> statement-breakpoint
 CREATE TABLE "tx_payloads" (
