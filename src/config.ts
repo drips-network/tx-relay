@@ -49,11 +49,14 @@ const configSchema = z.object({
     url: z.url(),
   })).default([]),
   wallets: z.array(z.object({
+    privateKey: z.string(),
     chains: z.array(z.object({
       chainId: z.number(),
-      confirmations: z.number().default(1).transform(BigInt),
+      confirmations: z.number().default(1),
+      minGasIncreasePercent: z.number().default(10),
+      blockTimeMs: z.number().default(10_000),
+      miningTimeBlocks: z.number().default(5),
     })),
-    privateKey: z.string(),
   })).default([]),
 });
 
@@ -93,73 +96,42 @@ function getRpcUrlsValue(): RpcUrls {
   return rpcUrls;
 }
 
-// Wallets configuration
+// Chains configuration
 
-export type Wallet =
+// TODO generics needed?
+export type Client =
   & WalletClient<Transport, Chain, PrivateKeyAccount>
-  & PublicClient<Transport, Chain, PrivateKeyAccount>
-  & { confirmations: bigint };
-export type Wallets = Record<number, Wallet>;
+  & PublicClient<Transport, Chain, PrivateKeyAccount>;
 
-export function getWallets(): Wallets {
-  return wallets ??= getWalletsValue();
+export type ChainConfig = {
+  client: Client;
+  confirmations: number;
+  minGasIncreasePercent: number;
+  blockTimeMs: number;
+  miningTimeBlocks: number;
+};
+export type ChainConfigs = Record<number, ChainConfig>;
+
+export function getChainConfigs(): ChainConfigs {
+  return chainConfigs ??= getChainConfigsValue();
 }
 
-let wallets: Wallets | undefined;
+let chainConfigs: ChainConfigs | undefined;
 
-function getWalletsValue(): Wallets {
+function getChainConfigsValue(): ChainConfigs {
   const chains = getChains();
   const rpcUrls = getRpcUrls();
-  const wallets: Wallets = {};
+  const chainConfigs: ChainConfigs = {};
   for (const wallet of getConfig().wallets) {
     const account = privateKeyToAccount(wallet.privateKey as Hex);
-    for (const { chainId, confirmations } of wallet.chains) {
+    for (const { chainId, ...config } of wallet.chains) {
       const chain = chains[chainId];
       if (!chain) throw new Error("Unknown wallet chain ID " + chainId);
-      if (wallets[chainId]) throw new Error("Duplicate wallets for chain ID " + chainId);
-      wallets[chainId] = createWalletClient({ account, chain, transport: http(rpcUrls[chainId]) })
-        .extend(publicActions)
-        .extend(() => ({ confirmations }));
+      if (chainConfigs[chainId]) throw new Error("Duplicate wallets for chain ID " + chainId);
+      const client = createWalletClient({ account, chain, transport: http(rpcUrls[chainId]) })
+        .extend(publicActions);
+      chainConfigs[chainId] = { client, ...config };
     }
   }
-  return wallets;
+  return chainConfigs;
 }
-
-// Mutlicall3 wallets configuration
-
-// const multicall3Abi = parseAbi([
-//   "struct Call3 { address target; bool allowFailure; bytes callData; }",
-//   "struct Result { bool success; bytes returnData; }",
-//   "function aggregate3(Call3[] calls) payable returns (Result[] returnData)",
-// ]);
-
-// export type Multicall3 = GetContractReturnType<typeof multicall3Abi, WalletClient>;
-// export type Multicall3s = Record<number, Multicall3>;
-
-// export function getMulticall3s(): Multicall3s {
-//   return multicall3s ??= getMulticall3sValue();
-// }
-
-// let multicall3s: Multicall3s | undefined;
-
-// function getMulticall3sValue(): Multicall3s {
-//   const chains = getChains();
-//   const rpcUrls = getRpcUrls();
-//   const multicall3s: Multicall3s = {};
-//   for (const wallet of getConfig().wallets) {
-//     const account = privateKeyToAccount(wallet.privateKey as Hex);
-//     for (const { chainId } of wallet.chains) {
-//       const chain = chains[chainId];
-//       if (!chain) throw new Error("Unknown wallet chain ID " + chainId);
-
-//       const address = chain.contracts?.multicall3?.address;
-//       if (!address) throw new Error("No multicall3 for chain ID " + chainId);
-
-//       const client = createWalletClient({ account, chain, transport: http(rpcUrls[chainId]) });
-
-//       if (multicall3s[chainId]) throw new Error("Duplicate wallets for chain ID " + chainId);
-//       multicall3s[chainId] = getContract({ address, client, abi: multicall3Abi });
-//     }
-//   }
-//   return multicall3s;
-// }

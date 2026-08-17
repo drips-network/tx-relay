@@ -37,7 +37,7 @@ import {
   txsTable,
   txStateEnum,
 } from "./db/schema.ts";
-import { Wallet } from "./config.ts";
+import { ChainConfig, Client } from "./config.ts";
 
 function matchViemError(
   error: unknown,
@@ -76,7 +76,7 @@ type PendingTxs = {
 };
 
 type WorkerContext = {
-  wallet: Wallet;
+  chainConfig: ChainConfig;
   db: PostgresJsDatabase;
   pendingTxs?: PendingTxs;
   execBaseInclusionGas?: bigint;
@@ -90,17 +90,21 @@ function getWorkerContext(): WorkerContext {
   return contextStore;
 }
 
-function getWallet(): Wallet {
-  return getWorkerContext().wallet;
+function getClient(): Client {
+  return getChainConfig().client;
+}
+
+function getChainConfig(): ChainConfig {
+  return getWorkerContext().chainConfig;
 }
 
 function getDb(): PostgresJsDatabase {
   return getWorkerContext().db;
 }
 
-function getWalletNonce(): Promise<number> {
-  const wallet = getWallet();
-  return wallet.getTransactionCount({ address: wallet.account.address });
+function getNonce(): Promise<number> {
+  const client = getClient();
+  return client.getTransactionCount({ address: client.account.address });
 }
 
 function getPendingTxs(): PendingTxs {
@@ -122,10 +126,10 @@ async function getExecBaseInclusionGas(): Promise<bigint> {
 }
 
 async function calcExecBaseInclusionGas(): Promise<bigint> {
-  const wallet = getWallet();
-  const blockNumber = await wallet.getBlockNumber();
-  const emptyExecGas = await wallet.estimateGas({
-    account: wallet.account,
+  const client = getClient();
+  const blockNumber = await client.getBlockNumber();
+  const emptyExecGas = await client.estimateGas({
+    account: client.account,
     data: encodeFunctionData({
       abi: executorAbi,
       functionName: "exec",
@@ -134,8 +138,8 @@ async function calcExecBaseInclusionGas(): Promise<bigint> {
     to: executorAddr,
     blockNumber,
   });
-  const { result: emptyExecGasReport }: { result: bigint[] } = await wallet.simulateContract({
-    account: wallet.account,
+  const { result: emptyExecGasReport }: { result: bigint[] } = await client.simulateContract({
+    account: client.account,
     abi: executorAbi,
     functionName: "exec",
     args: [[]],
@@ -147,18 +151,18 @@ async function calcExecBaseInclusionGas(): Promise<bigint> {
 }
 
 function log(...message: unknown[]) {
-  const worker = workerContext.getStore()?.wallet.chain.name ?? "main";
+  const worker = workerContext.getStore()?.chainConfig.client.chain.name ?? "main";
   console.log(`${new Date().toISOString()} [${worker}]:`, ...message);
 }
 
 type Task = () => Promise<Tasks>;
 type Tasks = Task[] | Task | undefined;
 
-function runWalletWorker(wallet: Wallet, db: PostgresJsDatabase) {
-  workerContext.run({ wallet, db }, async () => {
-    log("Worker started");
-    while (true) {
-      try {
+function runWorker(chainConfig: ChainConfig, db: PostgresJsDatabase) {
+  while (true) {
+    try {
+      workerContext.run({ chainConfig, db }, async () => {
+        log("Worker started with a fresh state");
         const tasks: Task[] = [initRelay];
         while (true) {
           const task = tasks.pop();
@@ -166,15 +170,15 @@ function runWalletWorker(wallet: Wallet, db: PostgresJsDatabase) {
           const newTasks = await task();
           tasks.push(...[newTasks ?? []].flat().reverse());
         }
-      } catch (error) {
-        log("Worker restarting after a crash with error:", error);
-      }
+      });
+    } catch (error) {
+      log("Worker crashed with error:", error);
     }
-  });
+  }
 }
 
 async function initRelay(): Promise<Tasks> {
-  const isExecutorDeployed = () => getWallet().getCode({ address: executorAddr });
+  const isExecutorDeployed = () => getClient().getCode({ address: executorAddr });
   if (await isExecutorDeployed()) return cleanUpPendingTxs;
   return [
     // Deploy the executor
@@ -188,13 +192,13 @@ async function initRelay(): Promise<Tasks> {
 }
 
 async function cleanUpPendingTxs(): Promise<Tasks> {
-  const wallet = getWallet();
+  const client = getClient();
   const db = getDb();
   const senderIdQuery = db.select({ id: min(txSendersTable.id) })
     .from(txSendersTable)
     .innerJoin(txsTable, eq(txsTable.txSenderId, txSendersTable.id))
     .where(and(
-      eq(txSendersTable.chainId, wallet.chain.id),
+      eq(txSendersTable.chainId, client.chain.id),
       eq(txsTable.state, "pending"),
     ));
   const txSender = await db.select({
@@ -222,7 +226,7 @@ async function cleanUpPendingTxs(): Promise<Tasks> {
 
   // Any transactions still pending are probably outdated. Burn the nonce to prevent mining them.
   // If the nonce can't be burned, assume that the transactions are forgotten and won't be mined.
-  const onPending = senderAddr === wallet.account.address ? burnNonce : skipTx;
+  const onPending = senderAddr === client.account.address ? burnNonce : skipTx;
   return [() => watchTxs({ onPending }), cleanUpPendingTxs];
 }
 
@@ -247,7 +251,7 @@ async function sendNextBatch(lastCheckTime: number = 0): Promise<Tasks> {
     .innerJoin(burstsTable, eq(sequencesTable.id, burstsTable.sequenceId))
     .innerJoin(callsTable, eq(burstsTable.id, callsTable.burstId))
     .where(and(
-      eq(sequencesTable.chainId, getWallet().chain.id),
+      eq(sequencesTable.chainId, getClient().chain.id),
       eq(burstsTable.state, "pending"),
     ))
     .orderBy(sequencesTable.id, burstsTable.id, callsTable.id);
@@ -274,7 +278,7 @@ async function sendNextBatch(lastCheckTime: number = 0): Promise<Tasks> {
   }
   if (!payloadBursts.length) return sendNextBatchTask;
 
-  const nonce = await getWalletNonce();
+  const nonce = await getNonce();
   const calldata = encodeFunctionData({
     abi: executorAbi,
     functionName: "exec",
@@ -306,8 +310,8 @@ async function buildPayload(
   let execGas = 0n;
   const failedBurstIds: number[] = [];
 
-  const wallet = getWallet();
-  const blockNumber = await wallet.getBlockNumber();
+  const client = getClient();
+  const blockNumber = await client.getBlockNumber();
   let lastBurstInclusionGas = await getExecBaseInclusionGas();
 
   let outOfGasBursts = 0;
@@ -325,8 +329,8 @@ async function buildPayload(
         const abiBursts = payloadBursts.map(({ abiBurst }) => abiBurst);
         const abiSequenceBursts = abiBursts.slice(abiBursts.length - burstIdx);
 
-        const execNextGas = await wallet.estimateGas({
-          account: wallet.account,
+        const execNextGas = await client.estimateGas({
+          account: client.account,
           data: encodeFunctionData({
             abi: executorAbi,
             functionName: "execNext",
@@ -336,8 +340,8 @@ async function buildPayload(
           blockNumber,
         });
 
-        const { result: nextBurstGas } = await wallet.simulateContract({
-          account: wallet.account,
+        const { result: nextBurstGas } = await client.simulateContract({
+          account: client.account,
           abi: executorAbi,
           functionName: "execNext",
           args: [abiSequenceBursts, sequenceBurstsGas, nextAbiCalls],
@@ -349,7 +353,7 @@ async function buildPayload(
 
         inExecStage = true;
         const nextAbiBursts = [...abiBursts, nextAbiBurst];
-        const nextExecGas = await wallet.estimateGas({
+        const nextExecGas = await client.estimateGas({
           account: getAddress(stringToHex("Executor - drain gas")),
           data: encodeFunctionData({
             abi: executorAbi,
@@ -360,8 +364,8 @@ async function buildPayload(
           blockNumber,
         });
 
-        const { result: gasReport }: { result: bigint[] } = await wallet.simulateContract({
-          account: wallet.account,
+        const { result: gasReport }: { result: bigint[] } = await client.simulateContract({
+          account: client.account,
           abi: executorAbi,
           functionName: "exec",
           args: [nextAbiBursts],
@@ -409,7 +413,7 @@ async function sendTx(
   payload: { target: Address; calldata?: Hex; value?: bigint; gas?: bigint },
 ): Promise<Tasks> {
   log("Sending a transaction to", payload.target);
-  const nonce = await getWalletNonce();
+  const nonce = await getNonce();
   await getDb().transaction((dbTx) => registerPendingTx(dbTx, nonce, payload));
   return sendTxAttempt();
 }
@@ -424,10 +428,10 @@ async function registerPendingTx(
     gas?: bigint;
   },
 ): Promise<PendingTxs> {
-  const wallet = getWallet();
+  const client = getClient();
   const payload = { target, calldata: calldata ?? toHex(""), value, gas };
-  const address = wallet.account.address;
-  const chainId = wallet.chain.id;
+  const address = client.account.address;
+  const chainId = client.chain.id;
   await dbTx.insert(txSendersTable).values({ address, nonce, chainId }).onConflictDoNothing();
   const [{ txSenderId }] = await dbTx.select({ txSenderId: txSendersTable.id }).from(txSendersTable)
     .where(and(
@@ -462,7 +466,7 @@ function txCost(
 
 function increasedFees(fees: FeeValues): FeeValues {
   const { lastFees } = getPendingTxs();
-  const increasePercent = 10n; // TODO take increase from wallet
+  const increasePercent = BigInt(getChainConfig().minGasIncreasePercent);
   const increaseFee = (fee?: bigint, lastFee?: bigint): bigint | undefined => {
     if (fee === undefined || lastFee === undefined) return fee;
     const minFee = lastFee * (100n + increasePercent) / 100n + 1n;
@@ -505,7 +509,7 @@ async function burnNonce(delayMs?: number): Promise<Tasks> {
 }
 
 async function sendTxRaw(retryTask: Task): Promise<Tasks> {
-  const wallet = getWallet();
+  const client = getClient();
   const {
     txHashes,
     txSenderId,
@@ -513,7 +517,7 @@ async function sendTxRaw(retryTask: Task): Promise<Tasks> {
     nextPayload: { txPayloadId, target, calldata, value, gas },
   } = getPendingTxs();
   log("Attempting to send a transaction to", target);
-  const request = await wallet.prepareTransactionRequest(
+  const request = await client.prepareTransactionRequest(
     { nonce, to: target, data: calldata, value, gas },
   );
 
@@ -521,12 +525,12 @@ async function sendTxRaw(retryTask: Task): Promise<Tasks> {
   Object.assign(request, fees);
   getPendingTxs().lastFees = fees;
 
-  const signedTx = await wallet.signTransaction(request);
+  const signedTx = await client.signTransaction(request);
   txHashes.push(keccak256(signedTx));
   await getDb().insert(txsTable).values({ txHash: keccak256(signedTx), txSenderId, txPayloadId });
 
   try {
-    await wallet.sendRawTransaction({ serializedTransaction: signedTx });
+    await client.sendRawTransaction({ serializedTransaction: signedTx });
   } catch (error) {
     if (matchViemError(error, ExecutionRevertedError)) return burnNonce;
     else if (matchViemError(error, FeeCapTooLowError)) return retryTask;
@@ -543,9 +547,9 @@ async function waitForBalance(minBalance: bigint): Promise<Tasks> {
   if (pendingTxs && pendingTxs.nextPayload !== burnPayload) {
     return [burnNonce, () => waitForBalance(minBalance)];
   }
-  const wallet = getWallet();
-  while (await wallet.getBalance({ address: wallet.account.address }) < minBalance) {
-    log("Waiting for the balance to be at least", minBalance, "for wallet", wallet.account.address);
+  const client = getClient();
+  while (await client.getBalance({ address: client.account.address }) < minBalance) {
+    log("Waiting for the balance to be at least", minBalance, "for wallet", client.account.address);
     await delay(10_000);
   }
   if (pendingTxs) return watchTxs({ onPending: burnNonce });
@@ -557,28 +561,29 @@ async function watchTxs(
   },
 ): Promise<Tasks> {
   const { txHashes, nonce } = getPendingTxs();
-  const wallet = getWallet();
+  const { client, blockTimeMs, miningTimeBlocks } = getChainConfig();
+  const confirmations = BigInt(getChainConfig().confirmations);
   let skipOnBlock;
   for (let attempt = 0; true; attempt++) {
     log("Watching transactions for nonce", nonce, "attempt", attempt);
     let receipt;
     for (const hash of txHashes.toReversed()) {
       try {
-        receipt = await wallet.getTransactionReceipt({ hash });
+        receipt = await client.getTransactionReceipt({ hash });
       } catch (error) {
         if (matchViemError(error, TransactionReceiptNotFoundError)) continue;
         else throw error;
       }
-      if (await wallet.getBlockNumber() >= receipt.blockNumber + wallet.confirmations) {
+      if (await client.getBlockNumber() >= receipt.blockNumber + confirmations) {
         await finalizeTxs(receipt);
         return;
       }
       break;
     }
 
-    if (!receipt && await getWalletNonce() > nonce) {
-      const blockNumber = await wallet.getBlockNumber();
-      skipOnBlock ??= blockNumber + wallet.confirmations;
+    if (!receipt && await getNonce() > nonce) {
+      const blockNumber = await client.getBlockNumber();
+      skipOnBlock ??= blockNumber + confirmations;
       if (blockNumber >= skipOnBlock) {
         await skipTx();
         return;
@@ -587,9 +592,9 @@ async function watchTxs(
       skipOnBlock = undefined;
     }
 
-    if (!receipt && !skipOnBlock && attempt >= 10) return onPending; // TODO config
+    if (!receipt && !skipOnBlock && attempt >= miningTimeBlocks) return onPending;
 
-    await delay(10_000); // TODO 1 block
+    await delay(blockTimeMs);
   }
 }
 
@@ -654,4 +659,4 @@ async function skipTx(): Promise<undefined> {
     .where(eq(txsTable.txSenderId, txSenderId));
 }
 
-export { runWalletWorker };
+export { runWorker };

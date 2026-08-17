@@ -5,18 +5,18 @@ import { inArray, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import { burstsTable, callsTable, sequencesTable } from "./db/schema.ts";
-import { getDbUrl, getPort, getWallets } from "./config.ts";
-import { runWalletWorker } from "./worker.ts";
+import { getChainConfigs, getDbUrl, getPort } from "./config.ts";
+import { runWorker } from "./worker.ts";
 
 const db = drizzle({ connection: getDbUrl(), casing: "snake_case" });
 await migrate(db, { migrationsFolder: "./drizzle" });
 
-const wallets = getWallets();
-for (const wallet of Object.values(wallets)) runWalletWorker(wallet, db);
+const chainConfigs = getChainConfigs();
+for (const chainConfig of Object.values(chainConfigs)) runWorker(chainConfig, db);
 
 const sendSequencesArgSchema = z.object({
   sequences: z.array(z.object({
-    chainId: z.number().refine((chainId) => wallets[chainId], "Unsupported chain ID"),
+    chainId: z.number().refine((chainId) => chainConfigs[chainId], "Unsupported chain ID"),
     bursts: z.array(z.object({
       calls: z.array(z.object({
         target: z.string().refine(isAddress, "Not an address"),
@@ -49,7 +49,7 @@ async function parseJsonArg<S extends z.ZodTypeAny>(
 const router = new Router();
 router
   .post("/send-sequences", async (context) => {
-    let arg = await parseJsonArg(context, sendSequencesArgSchema);
+    const arg = await parseJsonArg(context, sendSequencesArgSchema);
     if (arg === undefined) return;
 
     const sequences: { id: string }[] = [];
@@ -76,7 +76,7 @@ router
     context.response.body = { sequences };
   })
   .post("/sequences-states", async (context) => {
-    let arg = await parseJsonArg(context, sequencesStatesArgSchema);
+    const arg = await parseJsonArg(context, sequencesStatesArgSchema);
     if (arg === undefined) return;
     const sequenceIds = arg.sequences.map(({ id }) => id);
 
