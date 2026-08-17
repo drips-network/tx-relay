@@ -61,18 +61,20 @@ const executorAddr = getContractAddress({
   salt: executorSalt,
 });
 
+type TxPayload = {
+  txPayloadId: number;
+  target: Address;
+  calldata: Hex;
+  value?: bigint;
+  gas?: bigint;
+};
+
 type PendingTxs = {
   txSenderId: number;
   nonce: number;
   txHashes: Hex[];
   lastFees?: FeeValues;
-  nextPayload: {
-    txPayloadId: number;
-    target: Address;
-    calldata: Hex;
-    value?: bigint;
-    gas?: bigint;
-  };
+  nextPayload: TxPayload;
 };
 
 type WorkerContext = {
@@ -80,6 +82,7 @@ type WorkerContext = {
   db: PostgresJsDatabase;
   pendingTxs?: PendingTxs;
   execBaseInclusionGas?: bigint;
+  burnPayload?: TxPayload;
 };
 
 const workerContext = new AsyncLocalStorage<WorkerContext>();
@@ -150,6 +153,23 @@ async function calcExecBaseInclusionGas(): Promise<bigint> {
   return emptyExecGas - emptyExecGasReport[0]!;
 }
 
+async function getBurnPayload(): Promise<TxPayload> {
+  const workerContext = getWorkerContext();
+  workerContext.burnPayload ??= await createBurnPayload();
+  return workerContext.burnPayload;
+}
+
+async function createBurnPayload(): Promise<TxPayload> {
+  const target = getAddress(stringToHex("Nonce burning target"));
+  const calldata = toHex("");
+  const insertedTxPayloads = await getDb().insert(txPayloadsTable)
+    .values({ target, calldata }).returning({ txPayloadId: txPayloadsTable.id });
+  const txPayloadId = insertedTxPayloads[0].txPayloadId;
+  const client = getClient();
+  const gas = await client.estimateGas({account: client.account, to: target, data: calldata});
+  return { txPayloadId, target, calldata, gas };
+}
+
 function log(...message: unknown[]) {
   const worker = workerContext.getStore()?.chainConfig.client.chain.name ?? "main";
   console.log(`${new Date().toISOString()} [${worker}]:`, ...message);
@@ -158,10 +178,10 @@ function log(...message: unknown[]) {
 type Task = () => Promise<Tasks>;
 type Tasks = Task[] | Task | undefined;
 
-function runWorker(chainConfig: ChainConfig, db: PostgresJsDatabase) {
+export async function runWorker(chainConfig: ChainConfig, db: PostgresJsDatabase) {
   while (true) {
     try {
-      workerContext.run({ chainConfig, db }, async () => {
+      await workerContext.run({ chainConfig, db }, async () => {
         log("Worker started with a fresh state");
         const tasks: Task[] = [initRelay];
         while (true) {
@@ -221,7 +241,7 @@ async function cleanUpPendingTxs(): Promise<Tasks> {
     txSenderId,
     nonce,
     txHashes: txs.map(({ txHash }) => txHash!),
-    nextPayload: burnPayload,
+    nextPayload: await getBurnPayload(),
   });
 
   // Any transactions still pending are probably outdated. Burn the nonce to prevent mining them.
@@ -480,18 +500,8 @@ function increasedFees(fees: FeeValues): FeeValues {
   } as FeeValues;
 }
 
-const burnPayload = await (async () => {
-  const target = getAddress(stringToHex("Nonce burning target"));
-  const calldata = toHex("");
-  const value = 0n;
-  const insertedTxPayloads = await getDb().insert(txPayloadsTable)
-    .values({ target, calldata, value }).returning({ txPayloadId: txPayloadsTable.id });
-  const txPayloadId = insertedTxPayloads[0].txPayloadId;
-  return { txPayloadId, target, calldata, value };
-})();
-
 async function burnNonce(delayMs?: number): Promise<Tasks> {
-  getPendingTxs().nextPayload = burnPayload;
+  getPendingTxs().nextPayload = await getBurnPayload();
 
   log("Burning nonce", getPendingTxs().nonce);
   if (!delayMs) delayMs = 1_000;
@@ -544,7 +554,7 @@ async function sendTxRaw(retryTask: Task): Promise<Tasks> {
 
 async function waitForBalance(minBalance: bigint): Promise<Tasks> {
   const pendingTxs = getWorkerContext().pendingTxs;
-  if (pendingTxs && pendingTxs.nextPayload !== burnPayload) {
+  if (pendingTxs && pendingTxs.nextPayload !== await getBurnPayload()) {
     return [burnNonce, () => waitForBalance(minBalance)];
   }
   const client = getClient();
@@ -658,5 +668,3 @@ async function skipTx(): Promise<undefined> {
   await getDb().update(txsTable).set({ state: "skipped" })
     .where(eq(txsTable.txSenderId, txSenderId));
 }
-
-export { runWorker };

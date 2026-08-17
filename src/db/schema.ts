@@ -9,7 +9,6 @@ import {
   timestamp,
   unique,
   uuid,
-  varchar,
 } from "drizzle-orm/pg-core";
 import { bytesToHex, type Hex, hexToBytes } from "viem";
 
@@ -49,9 +48,6 @@ export const callsTable = pgTable("calls", {
   gas: uint256(),
 });
 
-// Added by prepareTx
-
-// initTxSender?            restoreTxs - mark done?
 export const txSendersTable = pgTable(
   "tx_senders",
   {
