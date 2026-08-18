@@ -166,7 +166,7 @@ async function createBurnPayload(): Promise<TxPayload> {
     .values({ target, calldata }).returning({ txPayloadId: txPayloadsTable.id });
   const txPayloadId = insertedTxPayloads[0].txPayloadId;
   const client = getClient();
-  const gas = await client.estimateGas({account: client.account, to: target, data: calldata});
+  const gas = await client.estimateGas({ account: client.account, to: target, data: calldata });
   return { txPayloadId, target, calldata, gas };
 }
 
