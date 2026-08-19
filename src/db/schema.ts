@@ -11,6 +11,7 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 import { bytesToHex, type Hex, hexToBytes } from "viem";
+import { z } from "zod";
 
 const bytea = customType<{ data: Hex; driverData: Uint8Array }>({
   dataType: () => "bytea",
@@ -25,19 +26,57 @@ export const sequencesTable = pgTable("sequences", {
   chainId: integer().notNull(),
 });
 
+export const sequenceEventKindEnum = pgEnum("event_kind", ["created"]);
+
+export const sequenceEventsTable = pgTable("sequence_events", {
+  id: integer().primaryKey().generatedAlwaysAsIdentity(),
+  sequenceId: uuid().notNull().references(() => sequencesTable.id),
+  timestamp: timestamp({ withTimezone: true }).notNull().defaultNow(),
+  kind: sequenceEventKindEnum().notNull(),
+  details: jsonb().notNull(),
+});
+
+const sequenceEventCreatedSchema = z.object({
+  kind: z.literal("created"),
+  details: z.object({}),
+});
+
+const sequenceEventSchema = z.discriminatedUnion("kind", [
+  sequenceEventCreatedSchema,
+]);
+
+export type SequenceEvent = z.infer<typeof sequenceEventSchema>;
+export type SequenceEventKindEnum = (typeof sequenceEventKindEnum.enumValues)[number];
+
+const dbValueToSequenceEventKind = {
+  created: "created",
+} as const satisfies Record<SequenceEventKindEnum, SequenceEvent["kind"]>;
+
+const sequenceEventKindToDbValue = {
+  created: "created",
+} as const satisfies {
+  [K in keyof typeof dbValueToSequenceEventKind as (typeof dbValueToSequenceEventKind)[K]]: K;
+};
+
+export function sequenceEventToDbValue(
+  { kind, details }: SequenceEvent,
+): { kind: SequenceEventKindEnum; details: unknown } {
+  return { kind: sequenceEventKindToDbValue[kind], details };
+}
+
+export function dbValueToSequenceEvent(
+  eventKind: SequenceEventKindEnum,
+  details: unknown,
+): SequenceEvent {
+  return sequenceEventSchema.parse({ kind: dbValueToSequenceEventKind[eventKind], details });
+}
+
 export const burstStateEnum = pgEnum("burst_state", ["pending", "success", "failure"]);
 
 export const burstsTable = pgTable("bursts", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
   sequenceId: uuid().notNull().references(() => sequencesTable.id),
   state: burstStateEnum().notNull().default("pending"),
-});
-
-export const burstEventsTable = pgTable("burst_events", {
-  id: integer().primaryKey().generatedAlwaysAsIdentity(),
-  burstId: integer().notNull().references(() => burstsTable.id),
-  timestamp: timestamp({ withTimezone: true }).notNull().defaultNow(),
-  event: jsonb().notNull(),
 });
 
 export const callsTable = pgTable("calls", {
