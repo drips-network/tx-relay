@@ -26,7 +26,7 @@ export const sequencesTable = pgTable("sequences", {
   chainId: integer().notNull(),
 });
 
-export const sequenceEventKindEnum = pgEnum("event_kind", ["created"]);
+export const sequenceEventKindEnum = pgEnum("event_kind", ["created", "rejected"]);
 
 export const sequenceEventsTable = pgTable("sequence_events", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
@@ -41,8 +41,14 @@ const sequenceEventCreatedSchema = z.object({
   details: z.object({}),
 });
 
+const sequenceEventRejectedSchema = z.object({
+  kind: z.literal("rejected"),
+  details: z.object({ burstIds: z.array(z.number()) }),
+});
+
 const sequenceEventSchema = z.discriminatedUnion("kind", [
   sequenceEventCreatedSchema,
+  sequenceEventRejectedSchema,
 ]);
 
 export type SequenceEvent = z.infer<typeof sequenceEventSchema>;
@@ -50,10 +56,12 @@ export type SequenceEventKindEnum = (typeof sequenceEventKindEnum.enumValues)[nu
 
 const dbValueToSequenceEventKind = {
   created: "created",
+  rejected: "rejected",
 } as const satisfies Record<SequenceEventKindEnum, SequenceEvent["kind"]>;
 
 const sequenceEventKindToDbValue = {
   created: "created",
+  rejected: "rejected",
 } as const satisfies {
   [K in keyof typeof dbValueToSequenceEventKind as (typeof dbValueToSequenceEventKind)[K]]: K;
 };

@@ -30,6 +30,8 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import {
   burstsTable,
   callsTable,
+  sequenceEventsTable,
+  sequenceEventToDbValue,
   sequencesTable,
   txPayloadBurstsTable,
   txPayloadsTable,
@@ -291,10 +293,23 @@ async function sendNextBatch(lastCheckTime: number = 0): Promise<Tasks> {
     prevDbCall = dbCall;
   }
 
-  const { payloadBursts, execGas, failedBurstIds } = await buildPayload(dbSequences);
-  if (failedBurstIds.length) {
-    await db.update(burstsTable).set({ state: "failure" })
-      .where(inArray(burstsTable.id, failedBurstIds));
+  const { payloadBursts, execGas, failedSequences } = await buildPayload(dbSequences);
+  // if (failedBurstIds.length) {
+  //   await db.update(burstsTable).set({ state: "failure" })
+  //     .where(inArray(burstsTable.id, failedBurstIds));
+  // }
+  if (failedSequences.length) {
+    await db.transaction(async (dbTx) => {
+      const failedBurstIds = failedSequences.map(({ burstIds }) => burstIds).flat();
+      await db.update(burstsTable).set({ state: "failure" })
+        .where(inArray(burstsTable.id, failedBurstIds));
+
+      const events = failedSequences.map(({ sequenceId, burstIds }) => ({
+        sequenceId,
+        ...sequenceEventToDbValue({ kind: "rejected", details: { burstIds } }),
+      }));
+      await dbTx.insert(sequenceEventsTable).values(events);
+    });
   }
   if (!payloadBursts.length) return sendNextBatchTask;
 
@@ -324,11 +339,19 @@ type PayloadBurst = { id: number; abiBurst: AbiBurst; inclusionGas: bigint };
 
 async function buildPayload(
   dbSequences: DbSequence[],
-): Promise<{ payloadBursts: PayloadBurst[]; execGas: bigint; failedBurstIds: number[] }> {
+): Promise<
+  {
+    payloadBursts: PayloadBurst[];
+    execGas: bigint;
+    failedBurstIds: number[];
+    failedSequences: { sequenceId: string; burstIds: number[] }[];
+  }
+> {
   log("Building payload");
   const payloadBursts: PayloadBurst[] = [];
   let execGas = 0n;
   const failedBurstIds: number[] = [];
+  const failedSequences: { sequenceId: string; burstIds: number[] }[] = [];
 
   const client = getClient();
   const blockNumber = await client.getBlockNumber();
@@ -417,7 +440,12 @@ async function buildPayload(
         // with no other bursts affecting the state or using up gas.
         if ((!inExecStage && burstIdx == 0) || (inExecStage && payloadBursts.length == 0)) {
           log("Failed");
-          dbSequence.bursts.slice(burstIdx).forEach(({ id }) => failedBurstIds.push(id));
+          failedSequences.push({
+            sequenceId: dbSequence.id,
+            burstIds: dbSequence.bursts.slice(burstIdx).map(({ id }) => id),
+          });
+          // dbSequence.bursts.slice(burstIdx).forEach(({ id }) => failedBurstIds.push(id));
+          // rejectedBursts[dbSequence.id] = dbSequence.bursts.slice(burstIdx).map(({id}) => id);
         } else if (error instanceof EstimateGasExecutionError) {
           log("Out of gas");
           outOfGasBursts++;
@@ -426,7 +454,7 @@ async function buildPayload(
       }
     }
   }
-  return { payloadBursts, execGas, failedBurstIds };
+  return { payloadBursts, execGas, failedBurstIds, failedSequences };
 }
 
 async function sendTx(
