@@ -1,5 +1,5 @@
 {
-  "id": "bc61b498-e3de-4c22-98a6-63946515a31c",
+  "id": "29806756-b852-47f1-a619-11bbb8abea07",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -28,6 +28,12 @@
         "sequence_id": {
           "name": "sequence_id",
           "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "idx_in_sequence": {
+          "name": "idx_in_sequence",
+          "type": "integer",
           "primaryKey": false,
           "notNull": true
         },
@@ -521,7 +527,9 @@
       "name": "event_kind",
       "schema": "public",
       "values": [
-        "created"
+        "created",
+        "rejected",
+        "submitted"
       ]
     },
     "public.tx_state": {

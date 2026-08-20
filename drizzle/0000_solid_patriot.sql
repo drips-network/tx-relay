@@ -1,9 +1,10 @@
 CREATE TYPE "public"."burst_state" AS ENUM('pending', 'success', 'failure');--> statement-breakpoint
-CREATE TYPE "public"."event_kind" AS ENUM('created');--> statement-breakpoint
+CREATE TYPE "public"."event_kind" AS ENUM('created', 'rejected', 'submitted');--> statement-breakpoint
 CREATE TYPE "public"."tx_state" AS ENUM('pending', 'success', 'reverted', 'skipped');--> statement-breakpoint
 CREATE TABLE "bursts" (
 	"id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "bursts_id_seq" INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 START WITH 1 CACHE 1),
 	"sequence_id" uuid NOT NULL,
+	"idx_in_sequence" integer NOT NULL,
 	"state" "burst_state" DEFAULT 'pending' NOT NULL
 );
 --> statement-breakpoint

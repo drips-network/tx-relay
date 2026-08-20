@@ -298,15 +298,17 @@ async function sendNextBatch(lastCheckTime: number = 0): Promise<Tasks> {
     prevDbCall = dbCall;
   }
 
-  const { payloadBursts, execGas, failedSequences } = await buildPayload(dbSequences);
-  if (failedSequences.length) {
+  const { submittedSequences, execGas, rejectedSequences } = await buildPayload(dbSequences);
+  if (rejectedSequences.length) {
     await db.transaction(async (dbTx) => {
-      const failedBurstIds = failedSequences.map(({ bursts }) => bursts).flat().map(({ id }) => id);
+      const failedBurstIds = rejectedSequences.map(({ bursts }) => bursts).flat().map(({ id }) =>
+        id
+      );
       await db.update(burstsTable).set({ state: "failure" })
         .where(inArray(burstsTable.id, failedBurstIds));
 
-      const events = failedSequences.map(({ sequenceId, bursts }) => ({
-        sequenceId,
+      const events = rejectedSequences.map(({ id, bursts }) => ({
+        sequenceId: id,
         ...sequenceEventToDbValue({
           kind: "rejected",
           details: { bursts: bursts.map(({ idxInSequence }) => ({ idxInSequence })) },
@@ -315,13 +317,14 @@ async function sendNextBatch(lastCheckTime: number = 0): Promise<Tasks> {
       await dbTx.insert(sequenceEventsTable).values(events);
     });
   }
-  if (!payloadBursts.length) return sendNextBatchTask;
+  if (!submittedSequences.length) return sendNextBatchTask;
 
+  const submittedBursts = submittedSequences.map((sequence) => sequence.bursts).flat();
   const nonce = await getNonce();
   const calldata = encodeFunctionData({
     abi: executorAbi,
     functionName: "exec",
-    args: [payloadBursts.map(({ abiBurst }) => abiBurst)],
+    args: [submittedBursts.map((burst) => burst.abiBurst)],
   });
   await db.transaction(async (dbTx) => {
     const { nextPayload: { txPayloadId } } = await registerPendingTx(dbTx, nonce, {
@@ -329,11 +332,18 @@ async function sendNextBatch(lastCheckTime: number = 0): Promise<Tasks> {
       calldata,
       gas: execGas,
     });
-    await dbTx.insert(txPayloadBurstsTable).values(payloadBursts.map(
-      ({ burstId, inclusionGas }) => ({ txPayloadId, burstId, inclusionGas }),
+    await dbTx.insert(txPayloadBurstsTable).values(submittedBursts.map(
+      ({ id, inclusionGas }) => ({ txPayloadId, burstId: id, inclusionGas }),
     ));
-    // Object.entries(Object.groupBy(payloadBursts, ({sequenceId}) => sequenceId))
-    //   .map([sequenceId, payloadBursts] => )
+
+    const events = submittedSequences.map(({ id, bursts }) => ({
+      sequenceId: id,
+      ...sequenceEventToDbValue({
+        kind: "submitted",
+        details: { bursts: bursts.map(({ idxInSequence }) => ({ idxInSequence })) },
+      }),
+    }));
+    await dbTx.insert(sequenceEventsTable).values(events);
   });
 
   return [sendTxAttempt, sendNextBatchTask];
@@ -341,21 +351,25 @@ async function sendNextBatch(lastCheckTime: number = 0): Promise<Tasks> {
 
 type AbiCall = { target: Address; data: Hex; gas: bigint };
 type AbiBurst = { needsPrev: boolean; gas: bigint; calls: AbiCall[] };
-type PayloadBurst = {
-  burstId: number;
-  sequenceId: string;
-  abiBurst: AbiBurst;
-  inclusionGas: bigint;
+type SubmittedSequence = {
+  id: string;
+  bursts: { id: number; idxInSequence: number; abiBurst: AbiBurst; inclusionGas: bigint }[];
 };
-type FailedSequence = { sequenceId: string; bursts: { id: number; idxInSequence: number }[] };
+type RejectedSequence = { id: string; bursts: { id: number; idxInSequence: number }[] };
 
 async function buildPayload(
   dbSequences: DbSequence[],
-): Promise<{ payloadBursts: PayloadBurst[]; execGas: bigint; failedSequences: FailedSequence[] }> {
+): Promise<
+  {
+    submittedSequences: SubmittedSequence[];
+    execGas: bigint;
+    rejectedSequences: RejectedSequence[];
+  }
+> {
   log("Building payload");
-  const payloadBursts: PayloadBurst[] = [];
+  const submittedSequences: SubmittedSequence[] = [];
   let execGas = 0n;
-  const failedSequences: FailedSequence[] = [];
+  const rejectedSequences: RejectedSequence[] = [];
 
   const client = getClient();
   const blockNumber = await client.getBlockNumber();
@@ -373,7 +387,8 @@ async function buildPayload(
         const nextAbiCalls: AbiCall[] = dbBurst.calls.map(
           ({ target, calldata, gas }) => ({ target, data: calldata, gas: BigInt(gas ?? 0) }),
         );
-        const abiBursts = payloadBursts.map(({ abiBurst }) => abiBurst);
+        const abiBursts = submittedSequences.map((sequence) => sequence.bursts)
+          .flat().map((burst) => burst.abiBurst);
         const abiSequenceBursts = abiBursts.slice(abiBursts.length - burstIdx);
 
         const execNextGas = await client.estimateGas({
@@ -429,9 +444,10 @@ async function buildPayload(
         sequenceBurstsGas = gasReport.at(-2 - burstIdx)!;
         const burstInclusionGas = execGas - gasReport[0] - lastBurstInclusionGas;
         lastBurstInclusionGas += burstInclusionGas;
-        payloadBursts.push({
-          burstId: dbBurst.id,
-          sequenceId: dbSequence.id,
+        if (burstIdx == 0) submittedSequences.push({ id: dbSequence.id, bursts: [] });
+        submittedSequences.at(-1)!.bursts.push({
+          id: dbBurst.id,
+          idxInSequence: dbBurst.idxInSequence,
           abiBurst: nextAbiBurst,
           inclusionGas: burstInclusionGas,
         });
@@ -443,10 +459,10 @@ async function buildPayload(
         }
         // The burst reverted or ran out of gas when executed alone,
         // with no other bursts affecting the state or using up gas.
-        if ((!inExecStage && burstIdx == 0) || (inExecStage && payloadBursts.length == 0)) {
-          log("Failed");
-          failedSequences.push({
-            sequenceId: dbSequence.id,
+        if ((!inExecStage && burstIdx == 0) || (inExecStage && submittedSequences.length == 0)) {
+          log("Rejected");
+          rejectedSequences.push({
+            id: dbSequence.id,
             // This branch may only be executed for the first burst in a sequence,
             // so always all the bursts in that sequence are failing.
             bursts: dbSequence.bursts.map(({ id, idxInSequence }) => ({ id, idxInSequence })),
@@ -454,12 +470,12 @@ async function buildPayload(
         } else if (error instanceof EstimateGasExecutionError) {
           log("Out of gas");
           outOfGasBursts++;
-        } else log("Rejected");
+        } else log("Skipped");
         break;
       }
     }
   }
-  return { payloadBursts, execGas, failedSequences };
+  return { submittedSequences, execGas, rejectedSequences };
 }
 
 async function sendTx(
