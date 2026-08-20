@@ -7,6 +7,7 @@ import { migrate } from "drizzle-orm/postgres-js/migrator";
 import {
   burstsTable,
   callsTable,
+  dbValueToSequenceEvent,
   sequenceEventsTable,
   sequenceEventToDbValue,
   sequencesTable,
@@ -63,9 +64,9 @@ router
           .values({ chainId })
           .returning({ sequenceId: sequencesTable.id });
         sequences.push({ id: sequenceId });
-        for (const { calls } of bursts) {
+        for (const [idxInSequence, { calls }] of bursts.entries()) {
           const [{ burstId }] = await dbTx.insert(burstsTable)
-            .values({ sequenceId })
+            .values({ sequenceId, idxInSequence })
             .returning({ burstId: burstsTable.id });
           await dbTx.insert(callsTable)
             .values(calls.map(({ target, calldata }) => ({
@@ -115,7 +116,10 @@ router
       const sequences = sequenceIds.map((id) => {
         const { pending, successes, failures } = statesById[id];
         const events = (eventsById[id] ?? [])
-          .map(({ timestamp, kind, details }) => ({ timestamp, kind, details }));
+          .map(({ timestamp, kind, details }) => ({
+            timestamp,
+            ...dbValueToSequenceEvent(kind, details),
+          }));
         return { id, pending, successes, failures, events };
       });
       context.response.body = { sequences };

@@ -43,7 +43,7 @@ const sequenceEventCreatedSchema = z.object({
 
 const sequenceEventRejectedSchema = z.object({
   kind: z.literal("rejected"),
-  details: z.object({ burstIds: z.array(z.number()) }),
+  details: z.object({ bursts: z.array(z.object({ idxInSequence: z.number() })) }),
 });
 
 const sequenceEventSchema = z.discriminatedUnion("kind", [
@@ -73,10 +73,10 @@ export function sequenceEventToDbValue(
 }
 
 export function dbValueToSequenceEvent(
-  eventKind: SequenceEventKindEnum,
+  kind: SequenceEventKindEnum,
   details: unknown,
 ): SequenceEvent {
-  return sequenceEventSchema.parse({ kind: dbValueToSequenceEventKind[eventKind], details });
+  return sequenceEventSchema.parse({ kind: dbValueToSequenceEventKind[kind], details });
 }
 
 export const burstStateEnum = pgEnum("burst_state", ["pending", "success", "failure"]);
@@ -84,6 +84,7 @@ export const burstStateEnum = pgEnum("burst_state", ["pending", "success", "fail
 export const burstsTable = pgTable("bursts", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
   sequenceId: uuid().notNull().references(() => sequencesTable.id),
+  idxInSequence: integer().notNull(),
   state: burstStateEnum().notNull().default("pending"),
 });
 
