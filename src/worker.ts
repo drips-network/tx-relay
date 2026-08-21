@@ -301,18 +301,13 @@ async function sendNextBatch(lastCheckTime: number = 0): Promise<Tasks> {
   const { submittedSequences, execGas, rejectedSequences } = await buildPayload(dbSequences);
   if (rejectedSequences.length) {
     await db.transaction(async (dbTx) => {
-      const failedBurstIds = rejectedSequences.map(({ bursts }) => bursts).flat().map(({ id }) =>
-        id
-      );
+      const failedBurstIds = rejectedSequences.map(({ burstIds }) => burstIds).flat();
       await db.update(burstsTable).set({ state: "failure" })
         .where(inArray(burstsTable.id, failedBurstIds));
 
-      const events = rejectedSequences.map(({ id, bursts }) => ({
+      const events = rejectedSequences.map(({ id, fromIdxInSequence }) => ({
         sequenceId: id,
-        ...sequenceEventToDbValue({
-          kind: "rejected",
-          details: { bursts: bursts.map(({ idxInSequence }) => ({ idxInSequence })) },
-        }),
+        ...sequenceEventToDbValue({ kind: "rejected", details: { fromIdxInSequence } }),
       }));
       await dbTx.insert(sequenceEventsTable).values(events);
     });
@@ -336,11 +331,11 @@ async function sendNextBatch(lastCheckTime: number = 0): Promise<Tasks> {
       ({ id, inclusionGas }) => ({ txPayloadId, burstId: id, inclusionGas }),
     ));
 
-    const events = submittedSequences.map(({ id, bursts }) => ({
+    const events = submittedSequences.map(({ id, fromIdxInSequence, bursts }) => ({
       sequenceId: id,
       ...sequenceEventToDbValue({
         kind: "submitted",
-        details: { bursts: bursts.map(({ idxInSequence }) => ({ idxInSequence })) },
+        details: { fromIdxInSequence, burstsCount: bursts.length },
       }),
     }));
     await dbTx.insert(sequenceEventsTable).values(events);
@@ -353,9 +348,10 @@ type AbiCall = { target: Address; data: Hex; gas: bigint };
 type AbiBurst = { needsPrev: boolean; gas: bigint; calls: AbiCall[] };
 type SubmittedSequence = {
   id: string;
-  bursts: { id: number; idxInSequence: number; abiBurst: AbiBurst; inclusionGas: bigint }[];
+  fromIdxInSequence: number;
+  bursts: { id: number; abiBurst: AbiBurst; inclusionGas: bigint }[];
 };
-type RejectedSequence = { id: string; bursts: { id: number; idxInSequence: number }[] };
+type RejectedSequence = { id: string; fromIdxInSequence: number; burstIds: number[] };
 
 async function buildPayload(
   dbSequences: DbSequence[],
@@ -444,10 +440,15 @@ async function buildPayload(
         sequenceBurstsGas = gasReport.at(-2 - burstIdx)!;
         const burstInclusionGas = execGas - gasReport[0] - lastBurstInclusionGas;
         lastBurstInclusionGas += burstInclusionGas;
-        if (burstIdx == 0) submittedSequences.push({ id: dbSequence.id, bursts: [] });
+        if (burstIdx == 0) {
+          submittedSequences.push({
+            id: dbSequence.id,
+            fromIdxInSequence: dbBurst.idxInSequence,
+            bursts: [],
+          });
+        }
         submittedSequences.at(-1)!.bursts.push({
           id: dbBurst.id,
-          idxInSequence: dbBurst.idxInSequence,
           abiBurst: nextAbiBurst,
           inclusionGas: burstInclusionGas,
         });
@@ -463,9 +464,10 @@ async function buildPayload(
           log("Rejected");
           rejectedSequences.push({
             id: dbSequence.id,
+            fromIdxInSequence: dbBurst.idxInSequence,
             // This branch may only be executed for the first burst in a sequence,
             // so always all the bursts in that sequence are failing.
-            bursts: dbSequence.bursts.map(({ id, idxInSequence }) => ({ id, idxInSequence })),
+            burstIds: dbSequence.bursts.map(({ id }) => id),
           });
         } else if (error instanceof EstimateGasExecutionError) {
           log("Out of gas");

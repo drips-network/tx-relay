@@ -38,17 +38,17 @@ export const sequenceEventsTable = pgTable("sequence_events", {
 
 const sequenceEventCreatedSchema = z.object({
   kind: z.literal("created"),
-  details: z.object({}),
+  details: z.object({ burstsCount: z.number() }),
 });
 
 const sequenceEventRejectedSchema = z.object({
   kind: z.literal("rejected"),
-  details: z.object({ bursts: z.array(z.object({ idxInSequence: z.number() })) }),
+  details: z.object({ fromIdxInSequence: z.number() }),
 });
 
 const sequenceEventSubmittedSchema = z.object({
   kind: z.literal("submitted"),
-  details: z.object({ bursts: z.array(z.object({ idxInSequence: z.number() })) }),
+  details: z.object({ fromIdxInSequence: z.number(), burstsCount: z.number() }),
 });
 
 const sequenceEventSchema = z.discriminatedUnion("kind", [

@@ -75,8 +75,11 @@ router
               calldata: calldata,
             })));
         }
-        const event = sequenceEventToDbValue({ kind: "created", details: {} });
-        await dbTx.insert(sequenceEventsTable).values({ sequenceId, ...event });
+        const event = {
+          sequenceId,
+          ...sequenceEventToDbValue({ kind: "created", details: { burstsCount: bursts.length } }),
+        };
+        await dbTx.insert(sequenceEventsTable).values(event);
       }
     });
 
