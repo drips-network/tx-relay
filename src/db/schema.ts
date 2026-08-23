@@ -150,7 +150,7 @@ export const txStateEnum = pgEnum("tx_state", ["pending", "success", "reverted",
 export const txsTable = pgTable("txs", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
   txHash: bytea().unique(),
-  txSenderId: integer().notNull().references(() => txSendersTable.id),
+  // txSenderId: integer().notNull().references(() => txSendersTable.id),
   txPayloadId: integer().notNull().references(() => txPayloadsTable.id),
   state: txStateEnum().notNull().default("pending"),
 });

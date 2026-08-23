@@ -217,7 +217,8 @@ async function cleanUpPendingTxs(): Promise<Tasks> {
   const db = getDb();
   const senderIdQuery = db.select({ id: min(txSendersTable.id) })
     .from(txSendersTable)
-    .innerJoin(txsTable, eq(txsTable.txSenderId, txSendersTable.id))
+    .innerJoin(txPayloadsTable, eq(txPayloadsTable.txSenderId, txSendersTable.id))
+    .innerJoin(txsTable, eq(txsTable.txPayloadId, txPayloadsTable.id))
     .where(and(
       eq(txSendersTable.chainId, client.chain.id),
       eq(txsTable.state, "pending"),
@@ -235,7 +236,8 @@ async function cleanUpPendingTxs(): Promise<Tasks> {
 
   const txs = await db.select({ txHash: txsTable.txHash })
     .from(txsTable)
-    .where(eq(txsTable.txSenderId, txSenderId))
+    .innerJoin(txPayloadsTable, eq(txPayloadsTable.id, txsTable.txPayloadId))
+    .where(eq(txPayloadsTable.txSenderId, txSenderId))
     .orderBy(txsTable.id);
 
   setPendingTxs({
@@ -583,7 +585,6 @@ async function sendTxRaw(retryTask: Task): Promise<Tasks> {
   const client = getClient();
   const {
     txHashes,
-    txSenderId,
     nonce,
     nextPayload,
   } = getPendingTxs();
@@ -601,7 +602,7 @@ async function sendTxRaw(retryTask: Task): Promise<Tasks> {
 
   const signedTx = await client.signTransaction(request);
   txHashes.push(keccak256(signedTx));
-  await getDb().insert(txsTable).values({ txHash: keccak256(signedTx), txSenderId, txPayloadId });
+  await getDb().insert(txsTable).values({ txHash: keccak256(signedTx), txPayloadId });
 
   try {
     await client.sendRawTransaction({ serializedTransaction: signedTx });
@@ -674,19 +675,15 @@ async function watchTxs(
 
 async function finalizeTxs(receipt: TransactionReceipt) {
   log("Finalizing transaction", receipt.transactionHash, "with status", receipt.status);
-  const { txSenderId } = getPendingTxs();
+  const { txHashes } = getPendingTxs();
   setPendingTxs(undefined);
 
   await getDb().transaction(async (dbTx) => {
     await dbTx.update(txsTable).set({ state: "skipped" }).where(
-      eq(txsTable.txSenderId, txSenderId),
+      inArray(txsTable.txHash, txHashes),
     );
-    const statusToState: Record<
-      TransactionReceipt["status"],
-      (typeof txStateEnum.enumValues)[number]
-    > = { success: "success", reverted: "reverted" };
     await dbTx.update(txsTable)
-      .set({ state: statusToState[receipt.status] })
+      .set({ state: receipt.status })
       .where(eq(txsTable.txHash, receipt.transactionHash));
 
     const executedBursts: {
@@ -727,8 +724,8 @@ async function finalizeTxs(receipt: TransactionReceipt) {
 
 async function skipTx(): Promise<undefined> {
   log("Skipping transaction");
-  const { txSenderId } = getPendingTxs();
+  const { txHashes } = getPendingTxs();
   setPendingTxs(undefined);
   await getDb().update(txsTable).set({ state: "skipped" })
-    .where(eq(txsTable.txSenderId, txSenderId));
+    .where(inArray(txsTable.txHash, txHashes));
 }
