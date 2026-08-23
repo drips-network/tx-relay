@@ -62,11 +62,12 @@ const executorAddr = getContractAddress({
   bytecode: executorBytecode,
   salt: executorSalt,
 });
+const burnAddr = getAddress(stringToHex("Nonce burning target"));
 
 type TxPayload = {
   txPayloadId: number;
   target: Address;
-  calldata: Hex;
+  calldata?: Hex;
   value?: bigint;
   gas?: bigint;
   isBurn?: true;
@@ -77,8 +78,10 @@ type PendingTxs = {
   nonce: number;
   txHashes: Hex[];
   lastFees?: FeeValues;
-  nextPayload: TxPayload;
+  nextPayload?: TxPayload;
 };
+
+type PendingTxsWithPayload = PendingTxs & Required<Pick<PendingTxs, "nextPayload">>;
 
 type WorkerContext = {
   chainConfig: ChainConfig;
@@ -86,6 +89,7 @@ type WorkerContext = {
   pendingTxs?: PendingTxs;
   execBaseInclusionGas?: bigint;
   burnPayload?: TxPayload;
+  burnGas?: bigint;
 };
 
 const workerContext = new AsyncLocalStorage<WorkerContext>();
@@ -156,21 +160,15 @@ async function calcExecBaseInclusionGas(): Promise<bigint> {
   return emptyExecGas - emptyExecGasReport[0]!;
 }
 
-async function getBurnPayload(): Promise<TxPayload> {
+async function getBurnGas(): Promise<bigint> {
   const workerContext = getWorkerContext();
-  workerContext.burnPayload ??= await createBurnPayload();
-  return workerContext.burnPayload;
+  workerContext.burnGas ??= await calcBurnGas();
+  return workerContext.burnGas;
 }
 
-async function createBurnPayload(): Promise<TxPayload> {
-  const target = getAddress(stringToHex("Nonce burning target"));
-  const calldata = toHex("");
-  const insertedTxPayloads = await getDb().insert(txPayloadsTable)
-    .values({ target, calldata }).returning({ txPayloadId: txPayloadsTable.id });
-  const txPayloadId = insertedTxPayloads[0].txPayloadId;
+async function calcBurnGas(): Promise<bigint> {
   const client = getClient();
-  const gas = await client.estimateGas({ account: client.account, to: target, data: calldata });
-  return { txPayloadId, target, calldata, gas, isBurn: true };
+  return await client.estimateGas({ account: client.account, to: burnAddr });
 }
 
 function log(...message: unknown[]) {
@@ -244,7 +242,6 @@ async function cleanUpPendingTxs(): Promise<Tasks> {
     txSenderId,
     nonce,
     txHashes: txs.map(({ txHash }) => txHash!),
-    nextPayload: await getBurnPayload(),
   });
 
   // Any transactions still pending are probably outdated. Burn the nonce to prevent mining them.
@@ -323,7 +320,7 @@ async function sendNextBatch(lastCheckTime: number = 0): Promise<Tasks> {
     args: [submittedBursts.map((burst) => burst.abiBurst)],
   });
   await db.transaction(async (dbTx) => {
-    const { nextPayload: { txPayloadId } } = await registerPendingTx(dbTx, nonce, {
+    const { txPayloadId } = await registerPendingTx(dbTx, nonce, {
       target: executorAddr,
       calldata,
       gas: execGas,
@@ -490,18 +487,18 @@ async function sendTx(
   return sendTxAttempt();
 }
 
+// Must be called when there's no pending TX set.
 async function registerPendingTx(
   dbTx: PostgresJsDatabase,
   nonce: number,
-  { target, calldata, value, gas }: {
+  payload: {
     target: Address;
     calldata?: Hex;
     value?: bigint;
     gas?: bigint;
   },
-): Promise<PendingTxs> {
+): Promise<{ txPayloadId: number }> {
   const client = getClient();
-  const payload = { target, calldata: calldata ?? toHex(""), value, gas };
   const address = client.account.address;
   const chainId = client.chain.id;
   await dbTx.insert(txSendersTable).values({ address, nonce, chainId }).onConflictDoNothing();
@@ -512,10 +509,21 @@ async function registerPendingTx(
       eq(txSendersTable.chainId, chainId),
     ));
   const [{ txPayloadId }] = await dbTx.insert(txPayloadsTable)
-    .values(payload).returning({ txPayloadId: txPayloadsTable.id });
+    .values({ txSenderId, ...payload }).returning({ txPayloadId: txPayloadsTable.id });
   const pendingTxs = { txSenderId, nonce, txHashes: [], nextPayload: { txPayloadId, ...payload } };
   setPendingTxs(pendingTxs);
-  return pendingTxs;
+  return { txPayloadId };
+}
+
+// Must be called after 'registerPendingTx', when there's a pending TX set.
+async function registerPendingBurnTx() {
+  const pendingTxs = getPendingTxs();
+  // TODO estimate, insert and cache gas
+  const gas = await getBurnGas();
+  const [{ txPayloadId }] = await getDb().insert(txPayloadsTable)
+    .values({ txSenderId: pendingTxs.txSenderId, target: burnAddr, gas })
+    .returning({ txPayloadId: txPayloadsTable.id });
+  pendingTxs.nextPayload = { txPayloadId, target: burnAddr, gas, isBurn: true };
 }
 
 function sendTxAttempt(): Promise<Tasks> {
@@ -553,9 +561,10 @@ function increasedFees(fees: FeeValues): FeeValues {
 }
 
 async function burnNonce(delayMs?: number): Promise<Tasks> {
-  getPendingTxs().nextPayload = await getBurnPayload();
+  const pendingTxs = getPendingTxs();
+  if (!pendingTxs.nextPayload?.isBurn) await registerPendingBurnTx();
 
-  log("Burning nonce", getPendingTxs().nonce);
+  log("Burning nonce", pendingTxs.nonce);
   if (!delayMs) delayMs = 1_000;
   else {
     await delay(delayMs);
@@ -564,10 +573,10 @@ async function burnNonce(delayMs?: number): Promise<Tasks> {
     if (delayMs > maxDelayMs) {
       delayMs = maxDelayMs;
       // Break the perpetual fees incrase
-      delete getPendingTxs().lastFees;
+      delete pendingTxs.lastFees;
     }
   }
-  return sendTxRaw(burnNonce);
+  return sendTxRaw(() => burnNonce(delayMs));
 }
 
 async function sendTxRaw(retryTask: Task): Promise<Tasks> {
@@ -576,8 +585,11 @@ async function sendTxRaw(retryTask: Task): Promise<Tasks> {
     txHashes,
     txSenderId,
     nonce,
-    nextPayload: { txPayloadId, target, calldata, value, gas },
+    nextPayload,
   } = getPendingTxs();
+  if (!nextPayload) throw Error("No payload set to send");
+  const { txPayloadId, target, calldata, value, gas } = nextPayload;
+
   log("Attempting to send a transaction to", target);
   const request = await client.prepareTransactionRequest(
     { nonce, to: target, data: calldata, value, gas },
@@ -606,7 +618,7 @@ async function sendTxRaw(retryTask: Task): Promise<Tasks> {
 
 async function waitForBalance(minBalance: bigint): Promise<Tasks> {
   const pendingTxs = getWorkerContext().pendingTxs;
-  if (pendingTxs && !pendingTxs.nextPayload.isBurn) {
+  if (pendingTxs && !pendingTxs.nextPayload?.isBurn) {
     return [burnNonce, () => waitForBalance(minBalance)];
   }
   const client = getClient();
