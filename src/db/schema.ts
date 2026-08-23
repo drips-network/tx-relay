@@ -80,36 +80,18 @@ const sequenceEventSchema = z.discriminatedUnion("kind", [
 export type SequenceEvent = z.infer<typeof sequenceEventSchema>;
 export type SequenceEventKindEnum = (typeof sequenceEventKindEnum.enumValues)[number];
 
-// TODO drop those mappings?
-const dbValueToSequenceEventKind = {
-  created: "created",
-  rejected: "rejected",
-  submitted: "submitted",
-  executed: "executed",
-  skipped: "skipped",
-} as const satisfies Record<SequenceEventKindEnum, SequenceEvent["kind"]>;
-
-const sequenceEventKindToDbValue = {
-  created: "created",
-  rejected: "rejected",
-  submitted: "submitted",
-  executed: "executed",
-  skipped: "skipped",
-} as const satisfies {
-  [K in keyof typeof dbValueToSequenceEventKind as (typeof dbValueToSequenceEventKind)[K]]: K;
-};
-
 export function sequenceEventToDbValue(
+  sequenceId: string,
   { kind, details }: SequenceEvent,
-): { kind: SequenceEventKindEnum; details: unknown } {
-  return { kind: sequenceEventKindToDbValue[kind], details };
+): { sequenceId: string; kind: SequenceEventKindEnum; details: unknown } {
+  return { sequenceId, kind, details };
 }
 
 export function dbValueToSequenceEvent(
   kind: SequenceEventKindEnum,
   details: unknown,
 ): SequenceEvent {
-  return sequenceEventSchema.parse({ kind: dbValueToSequenceEventKind[kind], details });
+  return sequenceEventSchema.parse({ kind, details });
 }
 
 export const burstStateEnum = pgEnum("burst_state", ["pending", "success", "failure"]);
@@ -150,7 +132,6 @@ export const txStateEnum = pgEnum("tx_state", ["pending", "success", "reverted",
 export const txsTable = pgTable("txs", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
   txHash: bytea().unique(),
-  // txSenderId: integer().notNull().references(() => txSendersTable.id),
   txPayloadId: integer().notNull().references(() => txPayloadsTable.id),
   state: txStateEnum().notNull().default("pending"),
 });

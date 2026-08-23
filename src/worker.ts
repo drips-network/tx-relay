@@ -305,10 +305,9 @@ async function sendNextBatch(lastCheckTime: number = 0): Promise<Tasks> {
       await db.update(burstsTable).set({ state: "failure" })
         .where(inArray(burstsTable.id, failedBurstIds));
 
-      const events = rejectedSequences.map(({ id, fromIdxInSequence }) => ({
-        sequenceId: id,
-        ...sequenceEventToDbValue({ kind: "rejected", details: { fromIdxInSequence } }),
-      }));
+      const events = rejectedSequences.map(({ id, fromIdxInSequence }) =>
+        sequenceEventToDbValue(id, { kind: "rejected", details: { fromIdxInSequence } })
+      );
       await dbTx.insert(sequenceEventsTable).values(events);
     });
   }
@@ -331,13 +330,12 @@ async function sendNextBatch(lastCheckTime: number = 0): Promise<Tasks> {
       ({ id, inclusionGas }) => ({ txPayloadId, burstId: id, inclusionGas }),
     ));
 
-    const events = submittedSequences.map(({ id, fromIdxInSequence, bursts }) => ({
-      sequenceId: id,
-      ...sequenceEventToDbValue({
+    const events = submittedSequences.map(({ id, fromIdxInSequence, bursts }) =>
+      sequenceEventToDbValue(id, {
         kind: "submitted",
         details: { fromIdxInSequence, burstsCount: bursts.length },
-      }),
-    }));
+      })
+    );
     await dbTx.insert(sequenceEventsTable).values(events);
   });
 
@@ -679,9 +677,9 @@ async function finalizeTxs(receipt: TransactionReceipt) {
   setPendingTxs(undefined);
 
   await getDb().transaction(async (dbTx) => {
-    await dbTx.update(txsTable).set({ state: "skipped" }).where(
-      inArray(txsTable.txHash, txHashes),
-    );
+    await dbTx.update(txsTable)
+      .set({ state: "skipped" })
+      .where(inArray(txsTable.txHash, txHashes));
     await dbTx.update(txsTable)
       .set({ state: receipt.status })
       .where(eq(txsTable.txHash, receipt.transactionHash));
@@ -724,8 +722,20 @@ async function finalizeTxs(receipt: TransactionReceipt) {
 
 async function skipTx(): Promise<undefined> {
   log("Skipping transaction");
-  const { txHashes } = getPendingTxs();
+  const { txSenderId, txHashes } = getPendingTxs();
   setPendingTxs(undefined);
-  await getDb().update(txsTable).set({ state: "skipped" })
-    .where(inArray(txsTable.txHash, txHashes));
+  await getDb().transaction(async (dbTx) => {
+    await dbTx.update(txsTable).set({ state: "skipped" })
+      .where(inArray(txsTable.txHash, txHashes));
+
+    const sequenceIds = await dbTx.select({ sequenceId: burstsTable.sequenceId })
+      .from(burstsTable)
+      .innerJoin(txPayloadBurstsTable, eq(txPayloadBurstsTable.burstId, burstsTable.id))
+      .innerJoin(txPayloadsTable, eq(txPayloadsTable.id, txPayloadBurstsTable.txPayloadId))
+      .where(eq(txPayloadsTable.txSenderId, txSenderId));
+    const events = sequenceIds.map(({ sequenceId }) =>
+      sequenceEventToDbValue(sequenceId, { kind: "skipped", details: {} })
+    );
+    await dbTx.insert(sequenceEventsTable).values(events);
+  });
 }
