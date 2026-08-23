@@ -69,6 +69,7 @@ type TxPayload = {
   calldata: Hex;
   value?: bigint;
   gas?: bigint;
+  isBurn?: true;
 };
 
 type PendingTxs = {
@@ -169,7 +170,7 @@ async function createBurnPayload(): Promise<TxPayload> {
   const txPayloadId = insertedTxPayloads[0].txPayloadId;
   const client = getClient();
   const gas = await client.estimateGas({ account: client.account, to: target, data: calldata });
-  return { txPayloadId, target, calldata, gas };
+  return { txPayloadId, target, calldata, gas, isBurn: true };
 }
 
 function log(...message: unknown[]) {
@@ -605,7 +606,7 @@ async function sendTxRaw(retryTask: Task): Promise<Tasks> {
 
 async function waitForBalance(minBalance: bigint): Promise<Tasks> {
   const pendingTxs = getWorkerContext().pendingTxs;
-  if (pendingTxs && pendingTxs.nextPayload !== await getBurnPayload()) {
+  if (pendingTxs && !pendingTxs.nextPayload.isBurn) {
     return [burnNonce, () => waitForBalance(minBalance)];
   }
   const client = getClient();

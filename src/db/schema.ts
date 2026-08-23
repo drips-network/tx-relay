@@ -21,13 +21,21 @@ const bytea = customType<{ data: Hex; driverData: Uint8Array }>({
 
 const uint256 = () => numeric({ precision: 78, scale: 0, mode: "bigint" });
 
+// Inserted when a sequence is queued for execution.
 export const sequencesTable = pgTable("sequences", {
   id: uuid().primaryKey().default(sql`uuidv7()`),
   chainId: integer().notNull(),
 });
 
-export const sequenceEventKindEnum = pgEnum("event_kind", ["created", "rejected", "submitted"]);
+export const sequenceEventKindEnum = pgEnum("event_kind", [
+  "created",
+  "rejected",
+  "submitted",
+  "executed",
+  "skipped",
+]);
 
+// Inserted when a sequence event occurs.
 export const sequenceEventsTable = pgTable("sequence_events", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
   sequenceId: uuid().notNull().references(() => sequencesTable.id),
@@ -51,25 +59,42 @@ const sequenceEventSubmittedSchema = z.object({
   details: z.object({ fromIdxInSequence: z.number(), burstsCount: z.number() }),
 });
 
+const sequenceEventExecutedSchema = z.object({
+  kind: z.literal("executed"),
+  details: z.object({ fromIdxInSequence: z.number(), successes: z.number(), failed: z.boolean() }),
+});
+
+const sequenceEventSkippedSchema = z.object({
+  kind: z.literal("skipped"),
+  details: z.object({}),
+});
+
 const sequenceEventSchema = z.discriminatedUnion("kind", [
   sequenceEventCreatedSchema,
   sequenceEventRejectedSchema,
   sequenceEventSubmittedSchema,
+  sequenceEventExecutedSchema,
+  sequenceEventSkippedSchema,
 ]);
 
 export type SequenceEvent = z.infer<typeof sequenceEventSchema>;
 export type SequenceEventKindEnum = (typeof sequenceEventKindEnum.enumValues)[number];
 
+// TODO drop those mappings?
 const dbValueToSequenceEventKind = {
   created: "created",
   rejected: "rejected",
   submitted: "submitted",
+  executed: "executed",
+  skipped: "skipped",
 } as const satisfies Record<SequenceEventKindEnum, SequenceEvent["kind"]>;
 
 const sequenceEventKindToDbValue = {
   created: "created",
   rejected: "rejected",
   submitted: "submitted",
+  executed: "executed",
+  skipped: "skipped",
 } as const satisfies {
   [K in keyof typeof dbValueToSequenceEventKind as (typeof dbValueToSequenceEventKind)[K]]: K;
 };
@@ -89,6 +114,7 @@ export function dbValueToSequenceEvent(
 
 export const burstStateEnum = pgEnum("burst_state", ["pending", "success", "failure"]);
 
+// Inserted when a sequence is queued for execution. 1 row per burst in a sequence.
 export const burstsTable = pgTable("bursts", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
   sequenceId: uuid().notNull().references(() => sequencesTable.id),
@@ -96,6 +122,7 @@ export const burstsTable = pgTable("bursts", {
   state: burstStateEnum().notNull().default("pending"),
 });
 
+// Inserted when a sequence is queued for execution. 1 row per call in a burst.
 export const callsTable = pgTable("calls", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
   burstId: integer().notNull().references(() => burstsTable.id),
@@ -104,6 +131,8 @@ export const callsTable = pgTable("calls", {
   gas: uint256(),
 });
 
+// Inserted when a new transaction sender is prepared to send its first transaction.
+// The sender is considered new when it uses a previously unused nonce on the given chain.
 export const txSendersTable = pgTable(
   "tx_senders",
   {
@@ -117,6 +146,7 @@ export const txSendersTable = pgTable(
 
 export const txStateEnum = pgEnum("tx_state", ["pending", "success", "reverted", "skipped"]);
 
+// Inserted when a signed transaction is published.
 export const txsTable = pgTable("txs", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
   txHash: bytea().unique(),
@@ -125,14 +155,17 @@ export const txsTable = pgTable("txs", {
   state: txStateEnum().notNull().default("pending"),
 });
 
+// Inserted when a new payload for transactions is created.
 export const txPayloadsTable = pgTable("tx_payloads", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
+  txSenderId: integer().notNull().references(() => txSendersTable.id),
   target: bytea().notNull(),
   calldata: bytea().notNull().default("0x"),
   value: uint256().notNull().default(sql`0`),
   gas: uint256(),
 });
 
+// Inserted when a batch is created, 1 row per burst in a batch.
 export const txPayloadBurstsTable = pgTable("tx_payload_bursts", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
   txPayloadId: integer().notNull().references(() => txPayloadsTable.id),
