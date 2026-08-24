@@ -27,6 +27,25 @@ export const sequencesTable = pgTable("sequences", {
   chainId: integer().notNull(),
 });
 
+export const burstStateEnum = pgEnum("burst_state", ["pending", "success", "failure"]);
+
+// Inserted when a sequence is queued for execution. 1 row per burst in a sequence.
+export const burstsTable = pgTable("bursts", {
+  id: integer().primaryKey().generatedAlwaysAsIdentity(),
+  sequenceId: uuid().notNull().references(() => sequencesTable.id),
+  idxInSequence: integer().notNull(),
+  state: burstStateEnum().notNull().default("pending"),
+});
+
+// Inserted when a sequence is queued for execution. 1 row per call in a burst.
+export const callsTable = pgTable("calls", {
+  id: integer().primaryKey().generatedAlwaysAsIdentity(),
+  burstId: integer().notNull().references(() => burstsTable.id),
+  target: bytea().notNull(),
+  calldata: bytea().notNull(),
+  gas: uint256(),
+});
+
 export const sequenceEventKindEnum = pgEnum("event_kind", [
   "created",
   "rejected",
@@ -93,25 +112,6 @@ export function dbValueToSequenceEvent(
 ): SequenceEvent {
   return sequenceEventSchema.parse({ kind, details });
 }
-
-export const burstStateEnum = pgEnum("burst_state", ["pending", "success", "failure"]);
-
-// Inserted when a sequence is queued for execution. 1 row per burst in a sequence.
-export const burstsTable = pgTable("bursts", {
-  id: integer().primaryKey().generatedAlwaysAsIdentity(),
-  sequenceId: uuid().notNull().references(() => sequencesTable.id),
-  idxInSequence: integer().notNull(),
-  state: burstStateEnum().notNull().default("pending"),
-});
-
-// Inserted when a sequence is queued for execution. 1 row per call in a burst.
-export const callsTable = pgTable("calls", {
-  id: integer().primaryKey().generatedAlwaysAsIdentity(),
-  burstId: integer().notNull().references(() => burstsTable.id),
-  target: bytea().notNull(),
-  calldata: bytea().notNull(),
-  gas: uint256(),
-});
 
 // Inserted when a new transaction sender is prepared to send its first transaction.
 // The sender is considered new when it uses a previously unused nonce on the given chain.

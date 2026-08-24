@@ -1,7 +1,7 @@
 import { Application, Context, Router } from "oak";
 import { z } from "zod";
-import { isAddress, isHex } from "viem";
-import { inArray, sql } from "drizzle-orm";
+import { Hex, isAddress, isHex } from "viem";
+import { eq, inArray, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import {
@@ -28,12 +28,19 @@ const sendSequencesArgSchema = z.object({
       calls: z.array(z.object({
         target: z.string().refine(isAddress, "Not an address"),
         calldata: z.string().refine(isHex, "Not a valid hex value"),
+        gas: z.number().optional(),
       })).nonempty(),
     })).nonempty(),
   })).nonempty(),
 });
 
 const sequencesStatesArgSchema = z.object({
+  sequences: z.array(z.object({
+    id: z.uuid(),
+  })).nonempty(),
+});
+
+const sequencesConfigArgSchema = z.object({
   sequences: z.array(z.object({
     id: z.uuid(),
   })).nonempty(),
@@ -69,10 +76,11 @@ router
             .values({ sequenceId, idxInSequence })
             .returning({ burstId: burstsTable.id });
           await dbTx.insert(callsTable)
-            .values(calls.map(({ target, calldata }) => ({
+            .values(calls.map(({ target, calldata, gas }) => ({
               burstId,
-              target: target,
-              calldata: calldata,
+              target,
+              calldata,
+              gas: gas === undefined ? undefined : BigInt(gas),
             })));
         }
         const event = sequenceEventToDbValue(sequenceId, {
@@ -127,6 +135,43 @@ router
       });
       context.response.body = { sequences };
     });
+  }).post("/sequences-config", async (context) => {
+    const arg = await parseJsonArg(context, sequencesConfigArgSchema);
+    const sequenceIds = arg.sequences.map(({ id }) => id);
+
+    const callRows = await db.select({
+      sequenceId: sequencesTable.id,
+      chainId: sequencesTable.chainId,
+      burstId: burstsTable.id,
+      target: callsTable.target,
+      calldata: callsTable.calldata,
+      gas: callsTable.gas,
+    })
+      .from(callsTable)
+      .innerJoin(burstsTable, eq(burstsTable.id, callsTable.burstId))
+      .innerJoin(sequencesTable, eq(sequencesTable.id, burstsTable.sequenceId))
+      .where(inArray(sequencesTable.id, sequenceIds))
+      .orderBy(burstsTable.id, callsTable.id);
+
+    const callsBySequenceId = Object.groupBy(callRows, (row) => row.sequenceId);
+    const unknownIds = sequenceIds.filter((id) => !callsBySequenceId[id]);
+    if (unknownIds.length) {
+      context.throw(404, "Unknown sequence IDs: " + unknownIds.join(", "));
+    }
+
+    const sequences = sequenceIds.map((sequenceId) => {
+      const calls = callsBySequenceId[sequenceId]!;
+      const bursts: { calls: { target: Hex; calldata: Hex; gas: number | undefined }[] }[] = [];
+      let lastBurstId: number | undefined;
+      for (const { burstId, target, calldata, gas } of calls) {
+        if (burstId !== lastBurstId) bursts.push({ calls: [] });
+        const call = { target, calldata, gas: gas === null ? undefined : Number(gas) };
+        bursts.at(-1)!.calls.push(call);
+        lastBurstId = burstId;
+      }
+      return { chainId: calls[0].chainId, bursts };
+    });
+    context.response.body = { sequences };
   });
 
 await new Application()
