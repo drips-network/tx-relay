@@ -1,5 +1,5 @@
 {
-  "id": "29806756-b852-47f1-a619-11bbb8abea07",
+  "id": "282b6e30-c02a-4cc2-b834-7d551abfc955",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -269,7 +269,7 @@
           "name": "inclusion_gas",
           "type": "numeric(78, 0)",
           "primaryKey": false,
-          "notNull": false
+          "notNull": true
         }
       },
       "indexes": {},
@@ -328,6 +328,12 @@
             "cycle": false
           }
         },
+        "tx_sender_id": {
+          "name": "tx_sender_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
         "target": {
           "name": "target",
           "type": "bytea",
@@ -356,7 +362,21 @@
         }
       },
       "indexes": {},
-      "foreignKeys": {},
+      "foreignKeys": {
+        "tx_payloads_tx_sender_id_tx_senders_id_fk": {
+          "name": "tx_payloads_tx_sender_id_tx_senders_id_fk",
+          "tableFrom": "tx_payloads",
+          "tableTo": "tx_senders",
+          "columnsFrom": [
+            "tx_sender_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
@@ -448,12 +468,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "tx_sender_id": {
-          "name": "tx_sender_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
         "tx_payload_id": {
           "name": "tx_payload_id",
           "type": "integer",
@@ -471,19 +485,6 @@
       },
       "indexes": {},
       "foreignKeys": {
-        "txs_tx_sender_id_tx_senders_id_fk": {
-          "name": "txs_tx_sender_id_tx_senders_id_fk",
-          "tableFrom": "txs",
-          "tableTo": "tx_senders",
-          "columnsFrom": [
-            "tx_sender_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
         "txs_tx_payload_id_tx_payloads_id_fk": {
           "name": "txs_tx_payload_id_tx_payloads_id_fk",
           "tableFrom": "txs",
@@ -529,7 +530,9 @@
       "values": [
         "created",
         "rejected",
-        "submitted"
+        "submitted",
+        "executed",
+        "skipped"
       ]
     },
     "public.tx_state": {

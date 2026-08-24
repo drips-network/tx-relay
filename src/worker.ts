@@ -30,6 +30,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import {
   burstsTable,
   callsTable,
+  SequenceEvent,
   sequenceEventsTable,
   sequenceEventToDbValue,
   sequencesTable,
@@ -248,7 +249,7 @@ async function cleanUpPendingTxs(): Promise<Tasks> {
 
   // Any transactions still pending are probably outdated. Burn the nonce to prevent mining them.
   // If the nonce can't be burned, assume that the transactions are forgotten and won't be mined.
-  const onPending = senderAddr === client.account.address ? burnNonce : skipTx;
+  const onPending = senderAddr === client.account.address ? burnNonce : finalizeTx;
   return [() => watchTxs({ onPending }), cleanUpPendingTxs];
 }
 
@@ -298,7 +299,7 @@ async function sendNextBatch(lastCheckTime: number = 0): Promise<Tasks> {
     prevDbCall = dbCall;
   }
 
-  const { submittedSequences, execGas, rejectedSequences } = await buildPayload(dbSequences);
+  const { submittedSequences, execGas, rejectedSequences } = await buildNextBatch(dbSequences);
   if (rejectedSequences.length) {
     await db.transaction(async (dbTx) => {
       const failedBurstIds = rejectedSequences.map(({ burstIds }) => burstIds).flat();
@@ -351,16 +352,14 @@ type SubmittedSequence = {
 };
 type RejectedSequence = { id: string; fromIdxInSequence: number; burstIds: number[] };
 
-async function buildPayload(
-  dbSequences: DbSequence[],
-): Promise<
+async function buildNextBatch(dbSequences: DbSequence[]): Promise<
   {
     submittedSequences: SubmittedSequence[];
     execGas: bigint;
     rejectedSequences: RejectedSequence[];
   }
 > {
-  log("Building payload");
+  log("Building the batch");
   const submittedSequences: SubmittedSequence[] = [];
   let execGas = 0n;
   const rejectedSequences: RejectedSequence[] = [];
@@ -371,11 +370,10 @@ async function buildPayload(
 
   let outOfGasBursts = 0;
   for (const dbSequence of dbSequences) {
-    log("Sequence", dbSequence.id);
+    log("Adding sequence", dbSequence.id, "to the batch");
     if (outOfGasBursts >= 5) break;
     let sequenceBurstsGas = 0n;
     for (const [burstIdx, dbBurst] of dbSequence.bursts.entries()) {
-      log("Burst", dbBurst.id);
       let inExecStage = false;
       try {
         const nextAbiCalls: AbiCall[] = dbBurst.calls.map(
@@ -436,7 +434,7 @@ async function buildPayload(
         // to be enough for the sequence's execution including any leftover gas.
         // 'gasReport' at -1 is gas left after the last burst and at -2 is before the last burst.
         sequenceBurstsGas = gasReport.at(-2 - burstIdx)!;
-        const burstInclusionGas = execGas - gasReport[0] - lastBurstInclusionGas;
+        const burstInclusionGas = nextExecGas - gasReport[0] - lastBurstInclusionGas;
         lastBurstInclusionGas += burstInclusionGas;
         if (burstIdx == 0) {
           submittedSequences.push({
@@ -451,7 +449,7 @@ async function buildPayload(
           inclusionGas: burstInclusionGas,
         });
         execGas = nextExecGas;
-        log("Accepted");
+        log("Burst", dbBurst.id, "accepted into the batch");
       } catch (error) {
         if (!matchViemError(error, ContractFunctionRevertedError, ExecutionRevertedError)) {
           throw error;
@@ -459,7 +457,7 @@ async function buildPayload(
         // The burst reverted or ran out of gas when executed alone,
         // with no other bursts affecting the state or using up gas.
         if ((!inExecStage && burstIdx == 0) || (inExecStage && submittedSequences.length == 0)) {
-          log("Rejected");
+          log("Burst", dbBurst.id, "rejected completely as failing");
           rejectedSequences.push({
             id: dbSequence.id,
             fromIdxInSequence: dbBurst.idxInSequence,
@@ -468,9 +466,9 @@ async function buildPayload(
             burstIds: dbSequence.bursts.map(({ id }) => id),
           });
         } else if (error instanceof EstimateGasExecutionError) {
-          log("Out of gas");
+          log("Burst", dbBurst.id, "runs out of gas when in batch, skipping");
           outOfGasBursts++;
-        } else log("Skipped");
+        } else log("Burst", dbBurst.id, "reverts when in batch, skipping");
         break;
       }
     }
@@ -527,7 +525,7 @@ async function registerPendingBurnTx() {
 }
 
 function sendTxAttempt(): Promise<Tasks> {
-  console.log("Sending TX attempt");
+  log("Sending TX attempt");
   // Try to send 3 times, then burn nonce
   const retryTask = getPendingTxs().txHashes.length < 2 ? sendTxAttempt : burnNonce;
   return sendTxRaw(retryTask);
@@ -648,7 +646,7 @@ async function watchTxs(
         else throw error;
       }
       if (await client.getBlockNumber() >= receipt.blockNumber + confirmations) {
-        await finalizeTxs(receipt);
+        await finalizeTx(receipt);
         return;
       }
       break;
@@ -658,7 +656,7 @@ async function watchTxs(
       const blockNumber = await client.getBlockNumber();
       skipOnBlock ??= blockNumber + confirmations;
       if (blockNumber >= skipOnBlock) {
-        await skipTx();
+        await finalizeTx();
         return;
       }
     } else {
@@ -671,33 +669,58 @@ async function watchTxs(
   }
 }
 
-async function finalizeTxs(receipt: TransactionReceipt) {
-  log("Finalizing transaction", receipt.transactionHash, "with status", receipt.status);
-  const { txHashes } = getPendingTxs();
+async function finalizeTx(receipt?: TransactionReceipt): Promise<undefined> {
+  log(
+    "Finalizing transaction",
+    receipt ? receipt.transactionHash + " with status " + receipt.status : "skipping",
+  );
+  const { txSenderId, txHashes } = getPendingTxs();
   setPendingTxs(undefined);
 
   await getDb().transaction(async (dbTx) => {
     await dbTx.update(txsTable)
       .set({ state: "skipped" })
-      .where(inArray(txsTable.txHash, txHashes));
-    await dbTx.update(txsTable)
-      .set({ state: receipt.status })
-      .where(eq(txsTable.txHash, receipt.transactionHash));
+      .where(
+        inArray(txsTable.txHash, txHashes.filter((hash) => hash !== receipt?.transactionHash)),
+      );
 
-    const executedBursts: {
+    let executedBursts: {
       sequenceId: string;
       burstId: number;
-    }[] = await dbTx.select({
-      sequenceId: burstsTable.sequenceId,
-      burstId: burstsTable.id,
-    })
-      .from(txsTable)
-      .innerJoin(txPayloadBurstsTable, eq(txPayloadBurstsTable.txPayloadId, txsTable.txPayloadId))
-      .innerJoin(burstsTable, eq(burstsTable.id, txPayloadBurstsTable.burstId))
-      .where(eq(txsTable.txHash, receipt.transactionHash))
-      .orderBy(txPayloadBurstsTable.id);
+      idxInSequence: number;
+      inclusionGas: bigint;
+    }[] = [];
+    if (receipt) {
+      await dbTx.update(txsTable)
+        .set({ state: receipt.status })
+        .where(eq(txsTable.txHash, receipt.transactionHash));
+
+      executedBursts = await dbTx.select({
+        sequenceId: burstsTable.sequenceId,
+        burstId: burstsTable.id,
+        idxInSequence: burstsTable.idxInSequence,
+        inclusionGas: txPayloadBurstsTable.inclusionGas,
+      })
+        .from(burstsTable)
+        .innerJoin(txPayloadBurstsTable, eq(txPayloadBurstsTable.burstId, burstsTable.id))
+        .innerJoin(txsTable, eq(txsTable.txPayloadId, txPayloadBurstsTable.txPayloadId))
+        .where(eq(txsTable.txHash, receipt.transactionHash))
+        .orderBy(txPayloadBurstsTable.id);
+    }
+
+    if (!receipt || !executedBursts.length) {
+      const skippedSequenceIds = await dbTx.selectDistinct({ sequenceId: burstsTable.sequenceId })
+        .from(burstsTable)
+        .innerJoin(txPayloadBurstsTable, eq(txPayloadBurstsTable.burstId, burstsTable.id))
+        .innerJoin(txPayloadsTable, eq(txPayloadsTable.id, txPayloadBurstsTable.txPayloadId))
+        .where(eq(txPayloadsTable.txSenderId, txSenderId));
+      const skippedEvents = skippedSequenceIds.map(({ sequenceId }) =>
+        sequenceEventToDbValue(sequenceId, { kind: "skipped", details: {} })
+      );
+      if (skippedEvents.length) await dbTx.insert(sequenceEventsTable).values(skippedEvents);
+      return;
+    }
     log("Got", executedBursts.length, "bursts finalized");
-    if (!executedBursts.length) return;
 
     const { topics, data } = receipt.logs.at(-1)!;
     const { gasReport } = decodeEventLog({ abi: executorAbi, eventName: "Receipt", topics, data })
@@ -706,8 +729,30 @@ async function finalizeTxs(receipt: TransactionReceipt) {
 
     const successBursts: number[] = [];
     const failureBursts: number[] = [];
-    for (const [burstIdx, { burstId }] of executedBursts.entries()) {
-      (gasReport[burstIdx + 1] > 0 ? successBursts : failureBursts).push(burstId);
+    const executedEvents: {
+      sequenceId: string;
+      details: {
+        fromIdxInSequence: number;
+        successes: number;
+        failed: boolean;
+      };
+    }[] = [];
+    for (const [burstIdx, { burstId, sequenceId, idxInSequence }] of executedBursts.entries()) {
+      let executedEvent = executedEvents.at(-1);
+      if (executedEvent?.sequenceId !== sequenceId) {
+        executedEvent = {
+          sequenceId,
+          details: { fromIdxInSequence: idxInSequence, successes: 0, failed: false },
+        };
+        executedEvents.push(executedEvent);
+      }
+      if (gasReport[burstIdx + 1] > 0) {
+        successBursts.push(burstId);
+        executedEvent.details.successes++;
+      } else {
+        failureBursts.push(burstId);
+        executedEvent.details.failed = true;
+      }
     }
     if (successBursts.length) {
       await dbTx.update(burstsTable).set({ state: "success" })
@@ -717,25 +762,34 @@ async function finalizeTxs(receipt: TransactionReceipt) {
       await dbTx.update(burstsTable).set({ state: "failure" })
         .where(inArray(burstsTable.id, failureBursts));
     }
-  });
-}
-
-async function skipTx(): Promise<undefined> {
-  log("Skipping transaction");
-  const { txSenderId, txHashes } = getPendingTxs();
-  setPendingTxs(undefined);
-  await getDb().transaction(async (dbTx) => {
-    await dbTx.update(txsTable).set({ state: "skipped" })
-      .where(inArray(txsTable.txHash, txHashes));
-
-    const sequenceIds = await dbTx.select({ sequenceId: burstsTable.sequenceId })
-      .from(burstsTable)
-      .innerJoin(txPayloadBurstsTable, eq(txPayloadBurstsTable.burstId, burstsTable.id))
-      .innerJoin(txPayloadsTable, eq(txPayloadsTable.id, txPayloadBurstsTable.txPayloadId))
-      .where(eq(txPayloadsTable.txSenderId, txSenderId));
-    const events = sequenceIds.map(({ sequenceId }) =>
-      sequenceEventToDbValue(sequenceId, { kind: "skipped", details: {} })
+    const events = executedEvents.map(({ sequenceId, details }) =>
+      sequenceEventToDbValue(sequenceId, { kind: "executed", details })
     );
     await dbTx.insert(sequenceEventsTable).values(events);
+
+    // Bursts cost calculation stub.
+    const burstCostShares: { burstId: number; cumulativeCostShare: bigint }[] = [];
+    let totalCostShares = 0n;
+    const abs = (num: bigint) => num < 0n ? -num : num;
+    for (const [burstIdx, { burstId, inclusionGas }] of executedBursts.entries()) {
+      totalCostShares += inclusionGas + abs(gasReport[burstIdx]) - abs(gasReport[burstIdx + 1]);
+      burstCostShares.push({ burstId, cumulativeCostShare: totalCostShares });
+    }
+    const totalCost = receipt.gasUsed * receipt.effectiveGasPrice;
+    let assignedCost = 0n;
+    for (const { burstId, cumulativeCostShare } of burstCostShares) {
+      const burstCost = cumulativeCostShare * totalCost / totalCostShares - assignedCost;
+      assignedCost += burstCost;
+      log("Burst", burstId, "costed", burstCost);
+    }
   });
 }
+
+// metered gas + inclusion gas + remainings(negative?) / bursts
+
+// tx.gasLimit - report[0] - sum(inclusionGas) = equal base
+//
+// EIP-7623: Increase calldata cost - calldata may use more gas
+// storage gas refunds - TX may use less gas
+//
+// the rest - split according to gas usage

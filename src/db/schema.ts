@@ -151,5 +151,5 @@ export const txPayloadBurstsTable = pgTable("tx_payload_bursts", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
   txPayloadId: integer().notNull().references(() => txPayloadsTable.id),
   burstId: integer().notNull().references(() => burstsTable.id),
-  inclusionGas: uint256(),
+  inclusionGas: uint256().notNull(),
 });

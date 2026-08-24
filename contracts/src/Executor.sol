@@ -18,12 +18,14 @@ struct Call {
 contract Executor {
     function exec(Burst[] calldata bursts) public returns (int256[] memory gasReport) {
         gasReport = new int256[](bursts.length + 1);
-        gasReport[0] = int256(gasleft());
-        for (uint256 idx = 0; idx < bursts.length;) {
+        bool success = true;
+        for (uint256 idx = 0; true; idx++) {
+            gasReport[idx] = success ? int256(gasleft()) : -int256(gasleft());
+            if (idx == bursts.length) break;
             Burst calldata burst = bursts[idx];
-            (bool success,) =
+            if (!success && burst.needsPrev) continue;
+            (success,) =
                 address(this).call{gas: burst.gas}(abi.encodeCall(this.execSingle, (burst.calls)));
-
             // forge-lint: disable-next-line(unsafe-typecast)
             if (tx.origin == address(bytes20("Executor - drain gas"))) {
                 // Assert that there was enough gas to cover the burst gas limit in full
@@ -31,19 +33,12 @@ contract Executor {
                 // Do not skip the next burst in the sequence
                 success = true;
             }
-
-            uint256 nextIdx = idx + 1;
-            // On revert, skip all the bursts dependent on the failed burst
-            if (!success) while (nextIdx < bursts.length && bursts[nextIdx].needsPrev) nextIdx++;
-            int256 gas = int256(gasleft());
-            gasReport[idx + 1] = success ? gas : -gas;
-            idx = nextIdx;
         }
         emit Receipt(gasReport);
     }
 
     /// @param burstsGas The gas needed to execute `bursts`.
-    /// It must be at least the whole gas needed to call `exec`, including any leftover gas,
+    /// It must be at least entire gas needed to call `exec`, including any leftover gas,
     /// but it may exclude the TX overhead, e.g. the calldata cost.
     function execNext(Burst[] calldata bursts, uint256 burstsGas, Call[] calldata nextBurstCalls)
         external
