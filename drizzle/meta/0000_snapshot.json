@@ -1,5 +1,5 @@
 {
-  "id": "282b6e30-c02a-4cc2-b834-7d551abfc955",
+  "id": "74738757-cf30-4f0b-8a27-f7ebbdd98249",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -347,13 +347,6 @@
           "notNull": true,
           "default": "'0x'"
         },
-        "value": {
-          "name": "value",
-          "type": "numeric(78, 0)",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "0"
-        },
         "gas": {
           "name": "gas",
           "type": "numeric(78, 0)",
@@ -466,7 +459,7 @@
           "name": "tx_hash",
           "type": "bytea",
           "primaryKey": false,
-          "notNull": false
+          "notNull": true
         },
         "tx_payload_id": {
           "name": "tx_payload_id",

@@ -131,7 +131,7 @@ export const txStateEnum = pgEnum("tx_state", ["pending", "success", "reverted",
 // Inserted when a signed transaction is published.
 export const txsTable = pgTable("txs", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
-  txHash: bytea().unique(),
+  txHash: bytea().notNull().unique(),
   txPayloadId: integer().notNull().references(() => txPayloadsTable.id),
   state: txStateEnum().notNull().default("pending"),
 });
@@ -142,7 +142,6 @@ export const txPayloadsTable = pgTable("tx_payloads", {
   txSenderId: integer().notNull().references(() => txSendersTable.id),
   target: bytea().notNull(),
   calldata: bytea().notNull().default("0x"),
-  value: uint256().notNull().default(sql`0`),
   gas: uint256(),
 });
 

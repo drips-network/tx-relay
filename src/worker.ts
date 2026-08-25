@@ -1,5 +1,4 @@
 import { delay } from "async";
-import { z } from "zod";
 import {
   Abi,
   Address,
@@ -20,7 +19,6 @@ import {
   NonceTooLowError,
   pad,
   stringToHex,
-  toHex,
   TransactionReceipt,
   TransactionReceiptNotFoundError,
 } from "viem";
@@ -30,7 +28,6 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import {
   burstsTable,
   callsTable,
-  SequenceEvent,
   sequenceEventsTable,
   sequenceEventToDbValue,
   sequencesTable,
@@ -38,7 +35,6 @@ import {
   txPayloadsTable,
   txSendersTable,
   txsTable,
-  txStateEnum,
 } from "./db/schema.ts";
 import { ChainConfig, Client } from "./config.ts";
 
@@ -65,31 +61,25 @@ const executorAddr = getContractAddress({
 });
 const burnAddr = getAddress(stringToHex("Nonce burning target"));
 
-type TxPayload = {
-  txPayloadId: number;
-  target: Address;
-  calldata?: Hex;
-  value?: bigint;
-  gas?: bigint;
-  isBurn?: true;
-};
-
 type PendingTxs = {
   txSenderId: number;
   nonce: number;
   txHashes: Hex[];
   lastFees?: FeeValues;
-  nextPayload?: TxPayload;
+  nextPayload?: {
+    txPayloadId: number;
+    target: Address;
+    calldata?: Hex;
+    gas?: bigint;
+    isBurn?: true;
+  };
 };
-
-type PendingTxsWithPayload = PendingTxs & Required<Pick<PendingTxs, "nextPayload">>;
 
 type WorkerContext = {
   chainConfig: ChainConfig;
   db: PostgresJsDatabase;
   pendingTxs?: PendingTxs;
   execBaseInclusionGas?: bigint;
-  burnPayload?: TxPayload;
   burnGas?: bigint;
 };
 
@@ -244,7 +234,7 @@ async function cleanUpPendingTxs(): Promise<Tasks> {
   setPendingTxs({
     txSenderId,
     nonce,
-    txHashes: txs.map(({ txHash }) => txHash!),
+    txHashes: txs.map(({ txHash }) => txHash),
   });
 
   // Any transactions still pending are probably outdated. Burn the nonce to prevent mining them.
@@ -476,9 +466,7 @@ async function buildNextBatch(dbSequences: DbSequence[]): Promise<
   return { submittedSequences, execGas, rejectedSequences };
 }
 
-async function sendTx(
-  payload: { target: Address; calldata?: Hex; value?: bigint; gas?: bigint },
-): Promise<Tasks> {
+async function sendTx(payload: { target: Address; calldata?: Hex; gas?: bigint }): Promise<Tasks> {
   log("Sending a transaction to", payload.target);
   const nonce = await getNonce();
   await getDb().transaction((dbTx) => registerPendingTx(dbTx, nonce, payload));
@@ -489,12 +477,7 @@ async function sendTx(
 async function registerPendingTx(
   dbTx: PostgresJsDatabase,
   nonce: number,
-  payload: {
-    target: Address;
-    calldata?: Hex;
-    value?: bigint;
-    gas?: bigint;
-  },
+  { target, calldata, gas }: { target: Address; calldata?: Hex; gas?: bigint },
 ): Promise<{ txPayloadId: number }> {
   const client = getClient();
   const address = client.account.address;
@@ -507,9 +490,13 @@ async function registerPendingTx(
       eq(txSendersTable.chainId, chainId),
     ));
   const [{ txPayloadId }] = await dbTx.insert(txPayloadsTable)
-    .values({ txSenderId, ...payload }).returning({ txPayloadId: txPayloadsTable.id });
-  const pendingTxs = { txSenderId, nonce, txHashes: [], nextPayload: { txPayloadId, ...payload } };
-  setPendingTxs(pendingTxs);
+    .values({ txSenderId, target, calldata, gas }).returning({ txPayloadId: txPayloadsTable.id });
+  setPendingTxs({
+    txSenderId,
+    nonce,
+    txHashes: [],
+    nextPayload: { txPayloadId, target, calldata, gas },
+  });
   return { txPayloadId };
 }
 
@@ -529,17 +516,6 @@ function sendTxAttempt(): Promise<Tasks> {
   // Try to send 3 times, then burn nonce
   const retryTask = getPendingTxs().txHashes.length < 2 ? sendTxAttempt : burnNonce;
   return sendTxRaw(retryTask);
-}
-
-function txCost(
-  { value, gas, gasPrice, maxFeePerGas }: {
-    value?: bigint;
-    gas?: bigint;
-    gasPrice?: bigint;
-    maxFeePerGas?: bigint;
-  },
-): bigint {
-  return (value ?? 0n) + (gas ?? 0n) * (maxFeePerGas ?? gasPrice ?? 0n);
 }
 
 function increasedFees(fees: FeeValues): FeeValues {
@@ -585,11 +561,11 @@ async function sendTxRaw(retryTask: Task): Promise<Tasks> {
     nextPayload,
   } = getPendingTxs();
   if (!nextPayload) throw Error("No payload set to send");
-  const { txPayloadId, target, calldata, value, gas } = nextPayload;
+  const { txPayloadId, target, calldata, gas } = nextPayload;
 
   log("Attempting to send a transaction to", target);
   const request = await client.prepareTransactionRequest(
-    { nonce, to: target, data: calldata, value, gas },
+    { nonce, to: target, data: calldata, gas },
   );
 
   const fees = increasedFees(request);
@@ -607,7 +583,7 @@ async function sendTxRaw(retryTask: Task): Promise<Tasks> {
     else if (matchViemError(error, FeeCapTooLowError)) return retryTask;
     else if (matchViemError(error, NonceTooLowError)) { /* Continue normally */ }
     else if (matchViemError(error, InsufficientFundsError)) {
-      return () => waitForBalance(txCost(request));
+      return () => waitForBalance(request.gas * (request.maxFeePerGas ?? request.gasPrice));
     } else throw error;
   }
   return () => watchTxs({ onPending: retryTask });
@@ -784,12 +760,3 @@ async function finalizeTx(receipt?: TransactionReceipt): Promise<undefined> {
     }
   });
 }
-
-// metered gas + inclusion gas + remainings(negative?) / bursts
-
-// tx.gasLimit - report[0] - sum(inclusionGas) = equal base
-//
-// EIP-7623: Increase calldata cost - calldata may use more gas
-// storage gas refunds - TX may use less gas
-//
-// the rest - split according to gas usage

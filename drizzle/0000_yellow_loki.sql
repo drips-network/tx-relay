@@ -41,7 +41,6 @@ CREATE TABLE "tx_payloads" (
 	"tx_sender_id" integer NOT NULL,
 	"target" "bytea" NOT NULL,
 	"calldata" "bytea" DEFAULT '0x' NOT NULL,
-	"value" numeric(78, 0) DEFAULT 0 NOT NULL,
 	"gas" numeric(78, 0)
 );
 --> statement-breakpoint
@@ -55,7 +54,7 @@ CREATE TABLE "tx_senders" (
 --> statement-breakpoint
 CREATE TABLE "txs" (
 	"id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "txs_id_seq" INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 START WITH 1 CACHE 1),
-	"tx_hash" "bytea",
+	"tx_hash" "bytea" NOT NULL,
 	"tx_payload_id" integer NOT NULL,
 	"state" "tx_state" DEFAULT 'pending' NOT NULL,
 	CONSTRAINT "txs_txHash_unique" UNIQUE("tx_hash")
