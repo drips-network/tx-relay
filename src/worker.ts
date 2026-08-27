@@ -529,20 +529,31 @@ function sendTxAttempt(): Promise<Tasks> {
   return sendTxRaw(retryTask);
 }
 
-function increasedFees(fees: FeeValues): FeeValues {
-  const { lastFees } = getPendingTxs();
+async function increasedFees(fees: FeeValues): Promise<FeeValues | null> {
+  const client = getClient();
+  let lastTx;
+  for (const hash of getPendingTxs().txHashes.toReversed()) {
+    lastTx = await client.getTransaction({ hash }).catch(() => undefined);
+    if (lastTx) break;
+  }
+  if (!lastTx) return fees;
+
   const increasePercent = BigInt(getChainConfig().minGasIncreasePercent);
-  const increaseFee = (fee?: bigint, lastFee?: bigint): bigint | undefined => {
+  const increaseFee = (fee?: bigint, lastFee?: bigint): bigint | undefined | null => {
     if (fee === undefined || lastFee === undefined) return fee;
     const minFee = lastFee * (100n + increasePercent) / 100n + 1n;
-    return fee > minFee ? fee : minFee;
+    if (minFee > fee * 150n / 100n) return null;
+    else if (minFee > fee) return minFee;
+    else return fee;
   };
-  return {
-    gasPrice: increaseFee(fees.gasPrice, lastFees?.gasPrice),
-    maxFeePerBlobGas: increaseFee(fees.maxFeePerBlobGas, lastFees?.maxFeePerBlobGas),
-    maxFeePerGas: increaseFee(fees.maxFeePerGas, lastFees?.maxFeePerGas),
-    maxPriorityFeePerGas: increaseFee(fees.maxPriorityFeePerGas, lastFees?.maxPriorityFeePerGas),
-  } as FeeValues;
+  const newFees = {
+    gasPrice: increaseFee(fees.gasPrice, lastTx.gasPrice),
+    maxFeePerBlobGas: increaseFee(fees.maxFeePerBlobGas, lastTx.maxFeePerBlobGas),
+    maxFeePerGas: increaseFee(fees.maxFeePerGas, lastTx.maxFeePerGas),
+    maxPriorityFeePerGas: increaseFee(fees.maxPriorityFeePerGas, lastTx.maxPriorityFeePerGas),
+  };
+  if (Object.values(newFees).includes(null)) return null;
+  return newFees as FeeValues;
 }
 
 async function burnNonce(delayMs?: number): Promise<Tasks> {
@@ -579,13 +590,16 @@ async function sendTxRaw(retryTask: Task): Promise<Tasks> {
     { nonce, to: target, data: calldata, gas },
   );
 
-  const fees = increasedFees(request);
+  const fees = await increasedFees(request);
+  if (!fees) return watchTxs({ onPending: retryTask });
+
   Object.assign(request, fees);
   getPendingTxs().lastFees = fees;
 
   const signedTx = await client.signTransaction(request);
-  txHashes.push(keccak256(signedTx));
-  await getDb().insert(txsTable).values({ txHash: keccak256(signedTx), txPayloadId });
+  const txHash = keccak256(signedTx);
+  txHashes.push(txHash);
+  await getDb().insert(txsTable).values({ txHash, txPayloadId });
 
   try {
     await client.sendRawTransaction({ serializedTransaction: signedTx });
@@ -595,6 +609,13 @@ async function sendTxRaw(retryTask: Task): Promise<Tasks> {
     else if (matchViemError(error, NonceTooLowError)) { /* Continue normally */ }
     else if (matchViemError(error, InsufficientFundsError)) {
       return () => waitForBalance(request.gas * (request.maxFeePerGas ?? request.gasPrice));
+    } else if (
+      error instanceof BaseError &&
+      error.walk((e) =>
+        e instanceof BaseError && /replacement transaction underpriced/i.test(e.details ?? "")
+      )
+    ) {
+      log("Replacement transaction", txHash, "underpriced"); // Continue normally
     } else throw error;
   }
   return () => watchTxs({ onPending: retryTask });
