@@ -64,34 +64,54 @@ const router = new Router();
 router
   .post("/send-sequences", async (context) => {
     const arg = await parseJsonArg(context, sendSequencesArgSchema);
-    const sequences: { id: string }[] = [];
+
+    let callsCount = 0;
+    arg.sequences.forEach(({ bursts }) =>
+      bursts.forEach(({ calls }) => callsCount += calls.length)
+    );
+    // Each Postgres request can accept up to 65_533 arguments.
+    // All calls are inserted in a single request, with each call requiring 4 arguments,
+    // so the limit of  16_000 calls caps the largest possible request at 64_000 arguments.
+    // All other inserts in this route use fewer arguments per row
+    // and their row counts never exceed the number of calls.
+    if (callsCount > 16_000) {
+      context.throw(400, "More than 16000 calls in a single request, got " + callsCount);
+    }
+
     await db.transaction(async (dbTx) => {
-      for (const { chainId, bursts } of arg.sequences) {
-        const [{ sequenceId }] = await dbTx.insert(sequencesTable)
-          .values({ chainId })
-          .returning({ sequenceId: sequencesTable.id });
-        sequences.push({ id: sequenceId });
-        for (const [idxInSequence, { calls }] of bursts.entries()) {
-          const [{ burstId }] = await dbTx.insert(burstsTable)
-            .values({ sequenceId, idxInSequence })
-            .returning({ burstId: burstsTable.id });
-          await dbTx.insert(callsTable)
-            .values(calls.map(({ target, calldata, gas }) => ({
-              burstId,
-              target,
-              calldata,
-              gas: gas === undefined ? undefined : BigInt(gas),
-            })));
-        }
-        const event = sequenceEventToDbValue(sequenceId, {
+      const sequenceIds = await dbTx.insert(sequencesTable)
+        .values(arg.sequences.map(({ chainId }) => ({ chainId })))
+        .returning({ sequenceId: sequencesTable.id });
+
+      const burstValues = arg.sequences.flatMap(({ bursts }, sequenceIdx) => {
+        const { sequenceId } = sequenceIds[sequenceIdx]!;
+        return bursts.map((_, idxInSequence) => ({ sequenceId, idxInSequence }));
+      });
+      const burstIds = await dbTx.insert(burstsTable)
+        .values(burstValues)
+        .returning({ burstId: burstsTable.id });
+
+      const callValues = arg.sequences.flatMap(({ bursts }) => bursts)
+        .flatMap(({ calls }, burstIdx) => {
+          const { burstId } = burstIds[burstIdx];
+          return calls.map(({ target, calldata, gas }) => (
+            { burstId, target, calldata, gas: gas === undefined ? null : BigInt(gas) }
+          ));
+        });
+      await dbTx.insert(callsTable).values(callValues);
+
+      const eventValues = arg.sequences.map(({ bursts }, sequenceIdx) =>
+        sequenceEventToDbValue(sequenceIds[sequenceIdx]!.sequenceId, {
           kind: "created",
           details: { burstsCount: bursts.length },
-        });
-        await dbTx.insert(sequenceEventsTable).values(event);
-      }
-    });
+        })
+      );
+      await dbTx.insert(sequenceEventsTable).values(eventValues);
 
-    context.response.body = { sequences };
+      context.response.body = {
+        sequences: sequenceIds.map(({ sequenceId }) => ({ id: sequenceId })),
+      };
+    });
   })
   .post("/sequences-states", async (context) => {
     const arg = await parseJsonArg(context, sequencesStatesArgSchema);
