@@ -7,7 +7,7 @@ COPY . .
 
 # Cache dependencies. Deno will use deno.json automatically.
 # Copy deno.json first so this layer is cached if only source files change.
-RUN deno cache main.ts --allow-import
+RUN deno cache src/main.ts --allow-import
 
 # Expose the port the app runs on
 EXPOSE 8000

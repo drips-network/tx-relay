@@ -1,6 +1,6 @@
 import { Application, Context, Router } from "oak";
 import { z } from "zod";
-import { Hex, isAddress, isHex } from "viem";
+import { Address, Hex, isAddress, isHex } from "viem";
 import { eq, inArray, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
@@ -26,9 +26,9 @@ const sendSequencesArgSchema = z.object({
     chainId: z.number().refine((chainId) => chainConfigs[chainId], "Unsupported chain ID"),
     bursts: z.array(z.object({
       calls: z.array(z.object({
-        target: z.string().refine(isAddress, "Not an address"),
-        calldata: z.string().refine(isHex, "Not a valid hex value"),
-        gas: z.number().optional(),
+        target: z.custom<Address>().refine(isAddress, "Not an address"),
+        calldata: z.custom<Hex>().refine((s) => isHex(s) && s.length % 2 == 0, "Not a hex value"),
+        gas: z.number().int().positive().optional(),
       })).nonempty(),
     })).nonempty(),
   })).nonempty(),

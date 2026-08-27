@@ -29,7 +29,7 @@ contract Executor {
             // forge-lint: disable-next-line(unsafe-typecast)
             if (tx.origin == address(bytes20("Executor - drain gas"))) {
                 // Assert that there was enough gas to cover the burst gas limit in full
-                require(gasleft() >= burst.gas / 64);
+                require(gasleft() * 63 >= burst.gas);
                 // Do not skip the next burst in the sequence
                 success = true;
             }

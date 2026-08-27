@@ -4,9 +4,7 @@
     "start": "deno run --allow-read=drizzle --allow-net --allow-sys=uid,gid,userInfo --allow-env --env-file src/main.ts",
     "contract-codegen": "forge build --root contracts && cp contracts/out/Executor.sol/Executor.json src/Executor.generated.json",
     "drizzle-kit": "deno run --allow-write=drizzle --allow-net --allow-sys=homedir --allow-env --env-file --allow-read npm:drizzle-kit",
-    "drizzle-generate": "deno task drizzle-kit generate",
-
-    "contracts": "cd contracts && "
+    "drizzle-generate": "deno task drizzle-kit generate"
   },
   "imports": {
     "drizzle-kit": "npm:drizzle-kit@^0.31.10",

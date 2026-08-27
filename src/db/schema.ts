@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import {
   customType,
+  index,
   integer,
   jsonb,
   numeric,
@@ -10,13 +11,19 @@ import {
   unique,
   uuid,
 } from "drizzle-orm/pg-core";
-import { bytesToHex, type Hex, hexToBytes } from "viem";
+import { type Address, bytesToHex, getAddress, type Hex, hexToBytes } from "viem";
 import { z } from "zod";
 
 const bytea = customType<{ data: Hex; driverData: Uint8Array }>({
   dataType: () => "bytea",
   toDriver: hexToBytes,
   fromDriver: bytesToHex,
+});
+
+const address = customType<{ data: Address; driverData: Uint8Array }>({
+  dataType: () => "bytea",
+  toDriver: (address) => hexToBytes(getAddress(address)),
+  fromDriver: (bytes) => getAddress(bytesToHex(bytes)),
 });
 
 const uint256 = () => numeric({ precision: 78, scale: 0, mode: "bigint" });
@@ -35,16 +42,19 @@ export const burstsTable = pgTable("bursts", {
   sequenceId: uuid().notNull().references(() => sequencesTable.id),
   idxInSequence: integer().notNull(),
   state: burstStateEnum().notNull().default("pending"),
-});
+}, (table) => [
+  index("bursts_sequence_id_idx").on(table.sequenceId),
+  index("bursts_state_idx").on(table.state).where(sql`${table.state} = 'pending'`),
+]);
 
 // Inserted when a sequence is queued for execution. 1 row per call in a burst.
 export const callsTable = pgTable("calls", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
   burstId: integer().notNull().references(() => burstsTable.id),
-  target: bytea().notNull(),
+  target: address().notNull(),
   calldata: bytea().notNull(),
   gas: uint256(),
-});
+}, (table) => [index("calls_burst_ids_idx").on(table.burstId)]);
 
 export const sequenceEventKindEnum = pgEnum("event_kind", [
   "created",
@@ -61,7 +71,7 @@ export const sequenceEventsTable = pgTable("sequence_events", {
   timestamp: timestamp({ withTimezone: true }).notNull().defaultNow(),
   kind: sequenceEventKindEnum().notNull(),
   details: jsonb().notNull(),
-});
+}, (table) => [index("sequence_events_sequence_id_idx").on(table.sequenceId)]);
 
 const sequenceEventCreatedSchema = z.object({
   kind: z.literal("created"),
@@ -119,7 +129,7 @@ export const txSendersTable = pgTable(
   "tx_senders",
   {
     id: integer().primaryKey().generatedAlwaysAsIdentity(),
-    address: bytea().notNull(),
+    address: address().notNull(),
     nonce: integer().notNull(),
     chainId: integer().notNull(),
   },
@@ -140,7 +150,7 @@ export const txsTable = pgTable("txs", {
 export const txPayloadsTable = pgTable("tx_payloads", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
   txSenderId: integer().notNull().references(() => txSendersTable.id),
-  target: bytea().notNull(),
+  target: address().notNull(),
   calldata: bytea().notNull().default("0x"),
   gas: uint256(),
 });

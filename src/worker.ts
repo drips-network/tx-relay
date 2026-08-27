@@ -170,6 +170,8 @@ function log(...message: unknown[]) {
 type Task = () => Promise<Tasks>;
 type Tasks = Task[] | Task | undefined;
 
+class WorkerMustStopError extends Error {}
+
 export async function runWorker(chainConfig: ChainConfig, db: PostgresJsDatabase) {
   while (true) {
     try {
@@ -185,20 +187,29 @@ export async function runWorker(chainConfig: ChainConfig, db: PostgresJsDatabase
       });
     } catch (error) {
       log("Worker crashed with error:", error);
+      if (error instanceof WorkerMustStopError) {
+        log("Worker will not restart");
+        break;
+      }
     }
   }
 }
 
 async function initRelay(): Promise<Tasks> {
-  const isExecutorDeployed = () => getClient().getCode({ address: executorAddr });
-  if (await isExecutorDeployed()) return cleanUpPendingTxs;
+  const isDeployed = (address: Address) => getClient().getCode({ address });
+  if (!await isDeployed(singletonFactory)) {
+    throw new WorkerMustStopError("Singleton factory not deployed at " + singletonFactory);
+  }
+  if (await isDeployed(executorAddr)) return cleanUpPendingTxs;
   return [
-    // Deploy the executor
+    // Deploy Executor
     () => sendTx({ target: singletonFactory, calldata: concat([executorSalt, executorBytecode]) }),
-    // Re-check if the executor is deployed, and starve the worker if not
+    // Re-check if Executor is deployed
     async () => {
-      if (await isExecutorDeployed()) return cleanUpPendingTxs;
-      else log("Failed to deploy the executor");
+      if (!await isDeployed(executorAddr)) {
+        throw new WorkerMustStopError("Failed to deploy Executor");
+      }
+      return cleanUpPendingTxs;
     },
   ];
 }
@@ -293,7 +304,7 @@ async function sendNextBatch(lastCheckTime: number = 0): Promise<Tasks> {
   if (rejectedSequences.length) {
     await db.transaction(async (dbTx) => {
       const failedBurstIds = rejectedSequences.map(({ burstIds }) => burstIds).flat();
-      await db.update(burstsTable).set({ state: "failure" })
+      await dbTx.update(burstsTable).set({ state: "failure" })
         .where(inArray(burstsTable.id, failedBurstIds));
 
       const events = rejectedSequences.map(({ id, fromIdxInSequence }) =>
@@ -455,7 +466,7 @@ async function buildNextBatch(dbSequences: DbSequence[]): Promise<
             // so always all the bursts in that sequence are failing.
             burstIds: dbSequence.bursts.map(({ id }) => id),
           });
-        } else if (error instanceof EstimateGasExecutionError) {
+        } else if (matchViemError(error, EstimateGasExecutionError)) {
           log("Burst", dbBurst.id, "runs out of gas when in batch, skipping");
           outOfGasBursts++;
         } else log("Burst", dbBurst.id, "reverts when in batch, skipping");
@@ -646,19 +657,17 @@ async function watchTxs(
 }
 
 async function finalizeTx(receipt?: TransactionReceipt): Promise<undefined> {
-  log(
-    "Finalizing transaction",
-    receipt ? receipt.transactionHash + " with status " + receipt.status : "skipping",
-  );
+  log("Finalizing transaction", receipt?.transactionHash ?? "skipping");
+  if (receipt?.status === "reverted") log("Transaction", receipt.transactionHash, "has reverted");
   const { txSenderId, txHashes } = getPendingTxs();
   setPendingTxs(undefined);
 
   await getDb().transaction(async (dbTx) => {
-    await dbTx.update(txsTable)
-      .set({ state: "skipped" })
-      .where(
-        inArray(txsTable.txHash, txHashes.filter((hash) => hash !== receipt?.transactionHash)),
-      );
+    const skippedTxs = txHashes.filter((hash) => hash !== receipt?.transactionHash);
+    if (skippedTxs.length) {
+      await dbTx.update(txsTable).set({ state: "skipped" })
+        .where(inArray(txsTable.txHash, skippedTxs));
+    }
 
     let executedBursts: {
       sequenceId: string;
@@ -684,7 +693,7 @@ async function finalizeTx(receipt?: TransactionReceipt): Promise<undefined> {
         .orderBy(txPayloadBurstsTable.id);
     }
 
-    if (!receipt || !executedBursts.length) {
+    if (receipt?.status !== "success" || !executedBursts.length) {
       const skippedSequenceIds = await dbTx.selectDistinct({ sequenceId: burstsTable.sequenceId })
         .from(burstsTable)
         .innerJoin(txPayloadBurstsTable, eq(txPayloadBurstsTable.burstId, burstsTable.id))
@@ -698,35 +707,34 @@ async function finalizeTx(receipt?: TransactionReceipt): Promise<undefined> {
     }
     log("Got", executedBursts.length, "bursts finalized");
 
-    const { topics, data } = receipt.logs.at(-1)!;
-    const { gasReport } = decodeEventLog({ abi: executorAbi, eventName: "Receipt", topics, data })
+    const lastLog = receipt.logs.at(-1);
+    if (lastLog?.address !== executorAddr) throw Error("No gas report in the transaction logs");
+    const { gasReport } = decodeEventLog({
+      abi: executorAbi,
+      eventName: "Receipt",
+      topics: lastLog.topics,
+      data: lastLog.data,
+    })
       .args as unknown as { gasReport: bigint[] };
     if (gasReport.length !== executedBursts.length + 1) throw Error("Invalid gas report");
 
     const successBursts: number[] = [];
-    const failureBursts: number[] = [];
+    const failureSequences: string[] = [];
     const executedEvents: {
       sequenceId: string;
-      details: {
-        fromIdxInSequence: number;
-        successes: number;
-        failed: boolean;
-      };
+      details: { fromIdxInSequence: number; successes: number; failed: boolean };
     }[] = [];
     for (const [burstIdx, { burstId, sequenceId, idxInSequence }] of executedBursts.entries()) {
-      let executedEvent = executedEvents.at(-1);
-      if (executedEvent?.sequenceId !== sequenceId) {
-        executedEvent = {
-          sequenceId,
-          details: { fromIdxInSequence: idxInSequence, successes: 0, failed: false },
-        };
-        executedEvents.push(executedEvent);
+      if (executedEvents.at(-1)?.sequenceId !== sequenceId) {
+        const details = { fromIdxInSequence: idxInSequence, successes: 0, failed: false };
+        executedEvents.push({ sequenceId, details });
       }
+      const executedEvent = executedEvents.at(-1)!;
       if (gasReport[burstIdx + 1] > 0) {
         successBursts.push(burstId);
         executedEvent.details.successes++;
       } else {
-        failureBursts.push(burstId);
+        if (failureSequences.at(-1) !== sequenceId) failureSequences.push(sequenceId);
         executedEvent.details.failed = true;
       }
     }
@@ -734,9 +742,11 @@ async function finalizeTx(receipt?: TransactionReceipt): Promise<undefined> {
       await dbTx.update(burstsTable).set({ state: "success" })
         .where(inArray(burstsTable.id, successBursts));
     }
-    if (failureBursts.length) {
-      await dbTx.update(burstsTable).set({ state: "failure" })
-        .where(inArray(burstsTable.id, failureBursts));
+    if (failureSequences.length) {
+      await dbTx.update(burstsTable).set({ state: "failure" }).where(and(
+        inArray(burstsTable.sequenceId, failureSequences),
+        eq(burstsTable.state, "pending"),
+      ));
     }
     const events = executedEvents.map(({ sequenceId, details }) =>
       sequenceEventToDbValue(sequenceId, { kind: "executed", details })
