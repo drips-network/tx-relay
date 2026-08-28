@@ -729,7 +729,6 @@ async function finalizeTx(receipt?: TransactionReceipt): Promise<undefined> {
     log("Got", executedBursts.length, "bursts finalized");
 
     const lastLog = receipt.logs.at(-1);
-    if (lastLog?.address !== executorAddr) throw Error("No gas report in the transaction logs");
     const { gasReport } = decodeEventLog({
       abi: executorAbi,
       eventName: "Receipt",
