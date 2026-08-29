@@ -66,4 +66,11 @@ ALTER TABLE "sequence_events" ADD CONSTRAINT "sequence_events_sequence_id_sequen
 ALTER TABLE "tx_payload_bursts" ADD CONSTRAINT "tx_payload_bursts_tx_payload_id_tx_payloads_id_fk" FOREIGN KEY ("tx_payload_id") REFERENCES "public"."tx_payloads"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "tx_payload_bursts" ADD CONSTRAINT "tx_payload_bursts_burst_id_bursts_id_fk" FOREIGN KEY ("burst_id") REFERENCES "public"."bursts"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "tx_payloads" ADD CONSTRAINT "tx_payloads_tx_sender_id_tx_senders_id_fk" FOREIGN KEY ("tx_sender_id") REFERENCES "public"."tx_senders"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "txs" ADD CONSTRAINT "txs_tx_payload_id_tx_payloads_id_fk" FOREIGN KEY ("tx_payload_id") REFERENCES "public"."tx_payloads"("id") ON DELETE no action ON UPDATE no action;
+ALTER TABLE "txs" ADD CONSTRAINT "txs_tx_payload_id_tx_payloads_id_fk" FOREIGN KEY ("tx_payload_id") REFERENCES "public"."tx_payloads"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+CREATE INDEX "bursts_sequence_id_idx" ON "bursts" USING btree ("sequence_id");--> statement-breakpoint
+CREATE INDEX "bursts_state_idx" ON "bursts" USING btree ("state") WHERE "bursts"."state" = 'pending';--> statement-breakpoint
+CREATE INDEX "calls_burst_ids_idx" ON "calls" USING btree ("burst_id");--> statement-breakpoint
+CREATE INDEX "sequence_events_sequence_id_idx" ON "sequence_events" USING btree ("sequence_id");--> statement-breakpoint
+CREATE INDEX "tx_payload_bursts_tx_payload_id_idx" ON "tx_payload_bursts" USING btree ("tx_payload_id");--> statement-breakpoint
+CREATE INDEX "tx_payloads_tx_sender_id_idx" ON "tx_payloads" USING btree ("tx_sender_id");--> statement-breakpoint
+CREATE INDEX "txs_state_idx" ON "txs" USING btree ("state") WHERE "txs"."state" = 'pending';

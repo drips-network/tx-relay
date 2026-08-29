@@ -7,7 +7,6 @@ import {
   ContractFunctionRevertedError,
   decodeEventLog,
   encodeFunctionData,
-  EstimateGasExecutionError,
   ExecutionRevertedError,
   FeeCapTooLowError,
   FeeValues,
@@ -37,6 +36,7 @@ import {
   txsTable,
 } from "./db/schema.ts";
 import { ChainConfig, Client } from "./config.ts";
+import { executorAbi, executorBytecode } from "./contracts.generated.ts";
 
 function matchViemError(
   error: unknown,
@@ -46,10 +46,6 @@ function matchViemError(
   if (!(error instanceof BaseError)) return null;
   return error.walk((e) => types.some((Type) => e instanceof Type));
 }
-
-import executorOutputJson from "./Executor.generated.json" with { type: "json" };
-const executorAbi: Abi = executorOutputJson.abi as Abi;
-const executorBytecode: Hex = executorOutputJson.bytecode.object as Hex;
 
 const singletonFactory = "0x914d7Fec6aaC8cd542e72Bca78B30650d45643d7";
 const executorSalt = pad("0x03");
@@ -65,7 +61,6 @@ type PendingTxs = {
   txSenderId: number;
   nonce: number;
   txHashes: Hex[];
-  lastFees?: FeeValues;
   nextPayload?: {
     txPayloadId: number;
     target: Address;
@@ -139,7 +134,7 @@ async function calcExecBaseInclusionGas(): Promise<bigint> {
     to: executorAddr,
     blockNumber,
   });
-  const { result: emptyExecGasReport }: { result: bigint[] } = await client.simulateContract({
+  const { result: [emptyExecStartGas] } = await client.simulateContract({
     account: client.account,
     abi: executorAbi,
     functionName: "exec",
@@ -148,7 +143,7 @@ async function calcExecBaseInclusionGas(): Promise<bigint> {
     blockNumber,
     gas: emptyExecGas,
   });
-  return emptyExecGas - emptyExecGasReport[0]!;
+  return emptyExecGas - emptyExecStartGas;
 }
 
 async function getBurnGas(): Promise<bigint> {
@@ -170,8 +165,6 @@ function log(...message: unknown[]) {
 type Task = () => Promise<Tasks>;
 type Tasks = Task[] | Task | undefined;
 
-class WorkerMustStopError extends Error {}
-
 export async function runWorker(chainConfig: ChainConfig, db: PostgresJsDatabase) {
   while (true) {
     try {
@@ -187,18 +180,16 @@ export async function runWorker(chainConfig: ChainConfig, db: PostgresJsDatabase
       });
     } catch (error) {
       log("Worker crashed with error:", error);
-      if (error instanceof WorkerMustStopError) {
-        log("Worker will not restart");
-        break;
-      }
     }
+    log("Worker will restart in 60 seconds");
+    await delay(60_000);
   }
 }
 
 async function initRelay(): Promise<Tasks> {
   const isDeployed = (address: Address) => getClient().getCode({ address });
   if (!await isDeployed(singletonFactory)) {
-    throw new WorkerMustStopError("Singleton factory not deployed at " + singletonFactory);
+    throw new Error("Singleton factory not deployed at " + singletonFactory);
   }
   if (await isDeployed(executorAddr)) return cleanUpPendingTxs;
   return [
@@ -206,9 +197,7 @@ async function initRelay(): Promise<Tasks> {
     () => sendTx({ target: singletonFactory, calldata: concat([executorSalt, executorBytecode]) }),
     // Re-check if Executor is deployed
     async () => {
-      if (!await isDeployed(executorAddr)) {
-        throw new WorkerMustStopError("Failed to deploy Executor");
-      }
+      if (!await isDeployed(executorAddr)) throw new Error("Failed to deploy Executor");
       return cleanUpPendingTxs;
     },
   ];
@@ -366,24 +355,26 @@ async function buildNextBatch(dbSequences: DbSequence[]): Promise<
   const rejectedSequences: RejectedSequence[] = [];
 
   const client = getClient();
-  const blockNumber = await client.getBlockNumber();
+  const blockNumber = await client.getBlockNumber({ cacheTime: 0 });
   let lastBurstInclusionGas = await getExecBaseInclusionGas();
 
   let outOfGasBursts = 0;
   for (const dbSequence of dbSequences) {
-    log("Adding sequence", dbSequence.id, "to the batch");
     if (outOfGasBursts >= 5) break;
+    log("Attempting adding sequence", dbSequence.id, "to the batch");
     let sequenceBurstsGas = 0n;
     for (const [burstIdx, dbBurst] of dbSequence.bursts.entries()) {
-      let inExecStage = false;
+      let onRevert: "reject" | "outOfGas" | "skip" = burstIdx == 0 ? "reject" : "skip";
       try {
         const nextAbiCalls: AbiCall[] = dbBurst.calls.map(
           ({ target, calldata, gas }) => ({ target, data: calldata, gas: BigInt(gas ?? 0) }),
         );
-        const abiBursts = submittedSequences.map((sequence) => sequence.bursts)
-          .flat().map((burst) => burst.abiBurst);
+        const abiBursts = submittedSequences.flatMap((sequence) => sequence.bursts)
+          .map((burst) => burst.abiBurst);
         const abiSequenceBursts = abiBursts.slice(abiBursts.length - burstIdx);
 
+        // If the next burst runs out of available gas when executed in the sequence,
+        // it's treated as a revert, and isn't counted as out of gas.
         const execNextGas = await client.estimateGas({
           account: client.account,
           data: encodeFunctionData({
@@ -406,8 +397,8 @@ async function buildNextBatch(dbSequences: DbSequence[]): Promise<
         });
         const nextAbiBurst = { needsPrev: burstIdx > 0, gas: nextBurstGas, calls: nextAbiCalls };
 
-        inExecStage = true;
         const nextAbiBursts = [...abiBursts, nextAbiBurst];
+        onRevert = submittedSequences.length == 0 ? "reject" : "outOfGas";
         const nextExecGas = await client.estimateGas({
           account: getAddress(stringToHex("Executor - drain gas")),
           data: encodeFunctionData({
@@ -419,7 +410,8 @@ async function buildNextBatch(dbSequences: DbSequence[]): Promise<
           blockNumber,
         });
 
-        const { result: gasReport }: { result: bigint[] } = await client.simulateContract({
+        if (onRevert === "outOfGas") onRevert = "skip";
+        const { result: gasReport } = await client.simulateContract({
           account: client.account,
           abi: executorAbi,
           functionName: "exec",
@@ -436,6 +428,7 @@ async function buildNextBatch(dbSequences: DbSequence[]): Promise<
         // 'gasReport' at -1 is gas left after the last burst and at -2 is before the last burst.
         sequenceBurstsGas = gasReport.at(-2 - burstIdx)!;
         const burstInclusionGas = nextExecGas - gasReport[0] - lastBurstInclusionGas;
+        if (burstInclusionGas <= 0) throw Error("Inclusion gas not positive: " + burstInclusionGas);
         lastBurstInclusionGas += burstInclusionGas;
         if (burstIdx == 0) {
           submittedSequences.push({
@@ -452,24 +445,29 @@ async function buildNextBatch(dbSequences: DbSequence[]): Promise<
         execGas = nextExecGas;
         log("Burst", dbBurst.id, "accepted into the batch");
       } catch (error) {
-        if (!matchViemError(error, ContractFunctionRevertedError, ExecutionRevertedError)) {
+        // This catches execution errors in `simulateContract` and `estimateGas`
+        // covering reverting, out-of-gas or inability to estimate a valid gas limit.
+        if (!matchViemError(error, ExecutionRevertedError, ContractFunctionRevertedError)) {
           throw error;
         }
-        // The burst reverted or ran out of gas when executed alone,
-        // with no other bursts affecting the state or using up gas.
-        if ((!inExecStage && burstIdx == 0) || (inExecStage && submittedSequences.length == 0)) {
-          log("Burst", dbBurst.id, "rejected completely as failing");
-          rejectedSequences.push({
-            id: dbSequence.id,
-            fromIdxInSequence: dbBurst.idxInSequence,
-            // This branch may only be executed for the first burst in a sequence,
-            // so always all the bursts in that sequence are failing.
-            burstIds: dbSequence.bursts.map(({ id }) => id),
-          });
-        } else if (matchViemError(error, EstimateGasExecutionError)) {
-          log("Burst", dbBurst.id, "runs out of gas when in batch, skipping");
-          outOfGasBursts++;
-        } else log("Burst", dbBurst.id, "reverts when in batch, skipping");
+        switch (onRevert) {
+          case "reject":
+            log("Burst", dbBurst.id, "rejected completely as failing");
+            rejectedSequences.push({
+              id: dbSequence.id,
+              fromIdxInSequence: dbBurst.idxInSequence,
+              // This branch may only be executed for the first burst in a sequence,
+              // so always all the bursts in that sequence are rejected.
+              burstIds: dbSequence.bursts.map(({ id }) => id),
+            });
+            break;
+          case "outOfGas":
+            log("Burst", dbBurst.id, "doesn't fit in the batch gas limit, skipping");
+            outOfGasBursts++;
+            break;
+          case "skip":
+            log("Burst", dbBurst.id, "can't be executed in the batch, skipping");
+        }
         break;
       }
     }
@@ -561,16 +559,10 @@ async function burnNonce(delayMs?: number): Promise<Tasks> {
   if (!pendingTxs.nextPayload?.isBurn) await registerPendingBurnTx();
 
   log("Burning nonce", pendingTxs.nonce);
-  if (!delayMs) delayMs = 1_000;
+  if (delayMs === undefined) delayMs = 1_000;
   else {
     await delay(delayMs);
-    delayMs *= 10;
-    const maxDelayMs = 60_000;
-    if (delayMs > maxDelayMs) {
-      delayMs = maxDelayMs;
-      // Break the perpetual fees incrase
-      delete pendingTxs.lastFees;
-    }
+    delayMs = Math.min(delayMs * 10, 60_000);
   }
   return sendTxRaw(() => burnNonce(delayMs));
 }
@@ -592,9 +584,7 @@ async function sendTxRaw(retryTask: Task): Promise<Tasks> {
 
   const fees = await increasedFees(request);
   if (!fees) return watchTxs({ onPending: retryTask });
-
   Object.assign(request, fees);
-  getPendingTxs().lastFees = fees;
 
   const signedTx = await client.signTransaction(request);
   const txHash = keccak256(signedTx);
@@ -728,7 +718,7 @@ async function finalizeTx(receipt?: TransactionReceipt): Promise<undefined> {
     }
     log("Got", executedBursts.length, "bursts finalized");
 
-    const lastLog = receipt.logs.at(-1);
+    const lastLog = receipt.logs.at(-1)!;
     const { gasReport } = decodeEventLog({
       abi: executorAbi,
       eventName: "Receipt",

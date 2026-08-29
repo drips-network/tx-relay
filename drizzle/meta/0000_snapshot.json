@@ -1,5 +1,5 @@
 {
-  "id": "ced57301-f61f-4279-98e9-65dab397604f",
+  "id": "0f48399c-355c-472a-84ea-bd229bf79304",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -46,7 +46,39 @@
           "default": "'pending'"
         }
       },
-      "indexes": {},
+      "indexes": {
+        "bursts_sequence_id_idx": {
+          "name": "bursts_sequence_id_idx",
+          "columns": [
+            {
+              "expression": "sequence_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "bursts_state_idx": {
+          "name": "bursts_state_idx",
+          "columns": [
+            {
+              "expression": "state",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"bursts\".\"state\" = 'pending'",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "bursts_sequence_id_sequences_id_fk": {
           "name": "bursts_sequence_id_sequences_id_fk",
@@ -114,7 +146,23 @@
           "notNull": false
         }
       },
-      "indexes": {},
+      "indexes": {
+        "calls_burst_ids_idx": {
+          "name": "calls_burst_ids_idx",
+          "columns": [
+            {
+              "expression": "burst_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "calls_burst_id_bursts_id_fk": {
           "name": "calls_burst_id_bursts_id_fk",
@@ -184,7 +232,23 @@
           "notNull": true
         }
       },
-      "indexes": {},
+      "indexes": {
+        "sequence_events_sequence_id_idx": {
+          "name": "sequence_events_sequence_id_idx",
+          "columns": [
+            {
+              "expression": "sequence_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "sequence_events_sequence_id_sequences_id_fk": {
           "name": "sequence_events_sequence_id_sequences_id_fk",
@@ -272,7 +336,23 @@
           "notNull": true
         }
       },
-      "indexes": {},
+      "indexes": {
+        "tx_payload_bursts_tx_payload_id_idx": {
+          "name": "tx_payload_bursts_tx_payload_id_idx",
+          "columns": [
+            {
+              "expression": "tx_payload_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "tx_payload_bursts_tx_payload_id_tx_payloads_id_fk": {
           "name": "tx_payload_bursts_tx_payload_id_tx_payloads_id_fk",
@@ -354,7 +434,23 @@
           "notNull": false
         }
       },
-      "indexes": {},
+      "indexes": {
+        "tx_payloads_tx_sender_id_idx": {
+          "name": "tx_payloads_tx_sender_id_idx",
+          "columns": [
+            {
+              "expression": "tx_sender_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "tx_payloads_tx_sender_id_tx_senders_id_fk": {
           "name": "tx_payloads_tx_sender_id_tx_senders_id_fk",
@@ -476,7 +572,24 @@
           "default": "'pending'"
         }
       },
-      "indexes": {},
+      "indexes": {
+        "txs_state_idx": {
+          "name": "txs_state_idx",
+          "columns": [
+            {
+              "expression": "state",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"txs\".\"state\" = 'pending'",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "txs_tx_payload_id_tx_payloads_id_fk": {
           "name": "txs_tx_payload_id_tx_payloads_id_fk",

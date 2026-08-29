@@ -4,6 +4,7 @@ import { Address, Hex, isAddress, isHex } from "viem";
 import { eq, inArray, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
+import postgres from "postgres";
 import {
   burstsTable,
   callsTable,

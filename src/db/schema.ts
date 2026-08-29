@@ -144,7 +144,9 @@ export const txsTable = pgTable("txs", {
   txHash: bytea().notNull().unique(),
   txPayloadId: integer().notNull().references(() => txPayloadsTable.id),
   state: txStateEnum().notNull().default("pending"),
-});
+}, (table) => [
+  index("txs_state_idx").on(table.state).where(sql`${table.state} = 'pending'`),
+]);
 
 // Inserted when a new payload for transactions is created.
 export const txPayloadsTable = pgTable("tx_payloads", {
@@ -153,7 +155,7 @@ export const txPayloadsTable = pgTable("tx_payloads", {
   target: address().notNull(),
   calldata: bytea().notNull().default("0x"),
   gas: uint256(),
-});
+}, (table) => [index("tx_payloads_tx_sender_id_idx").on(table.txSenderId)]);
 
 // Inserted when a batch is created, 1 row per burst in a batch.
 export const txPayloadBurstsTable = pgTable("tx_payload_bursts", {
@@ -161,4 +163,4 @@ export const txPayloadBurstsTable = pgTable("tx_payload_bursts", {
   txPayloadId: integer().notNull().references(() => txPayloadsTable.id),
   burstId: integer().notNull().references(() => burstsTable.id),
   inclusionGas: uint256().notNull(),
-});
+}, (table) => [index("tx_payload_bursts_tx_payload_id_idx").on(table.txPayloadId)]);
