@@ -41,6 +41,7 @@ export const burstsTable = pgTable("bursts", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
   sequenceId: uuid().notNull().references(() => sequencesTable.id),
   idxInSequence: integer().notNull(),
+  gasBufferPercent: integer(),
   state: burstStateEnum().notNull().default("pending"),
 }, (table) => [
   index("bursts_sequence_id_idx").on(table.sequenceId),

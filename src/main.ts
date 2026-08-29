@@ -26,6 +26,7 @@ const sendSequencesArgSchema = z.object({
   sequences: z.array(z.object({
     chainId: z.number().refine((chainId) => chainConfigs[chainId], "Unsupported chain ID"),
     bursts: z.array(z.object({
+      gasBufferPercent: z.number().int().nonnegative().optional(),
       calls: z.array(z.object({
         target: z.custom<Address>().refine(isAddress, "Not an address"),
         calldata: z.custom<Hex>().refine((s) => isHex(s) && s.length % 2 == 0, "Not a hex value"),
@@ -86,7 +87,11 @@ router
 
       const burstValues = arg.sequences.flatMap(({ bursts }, sequenceIdx) => {
         const { sequenceId } = sequenceIds[sequenceIdx]!;
-        return bursts.map((_, idxInSequence) => ({ sequenceId, idxInSequence }));
+        return bursts.map(({ gasBufferPercent }, idxInSequence) => ({
+          sequenceId,
+          idxInSequence,
+          gasBufferPercent,
+        }));
       });
       const burstIds = await dbTx.insert(burstsTable)
         .values(burstValues)
@@ -164,6 +169,7 @@ router
       sequenceId: sequencesTable.id,
       chainId: sequencesTable.chainId,
       burstId: burstsTable.id,
+      gasBufferPercent: burstsTable.gasBufferPercent,
       target: callsTable.target,
       calldata: callsTable.calldata,
       gas: callsTable.gas,
@@ -182,10 +188,15 @@ router
 
     const sequences = sequenceIds.map((sequenceId) => {
       const calls = callsBySequenceId[sequenceId]!;
-      const bursts: { calls: { target: Hex; calldata: Hex; gas: number | undefined }[] }[] = [];
+      const bursts: {
+        gasBufferPercent?: number;
+        calls: { target: Hex; calldata: Hex; gas: number | undefined }[];
+      }[] = [];
       let lastBurstId: number | undefined;
-      for (const { burstId, target, calldata, gas } of calls) {
-        if (burstId !== lastBurstId) bursts.push({ calls: [] });
+      for (const { burstId, gasBufferPercent, target, calldata, gas } of calls) {
+        if (burstId !== lastBurstId) {
+          bursts.push({ gasBufferPercent: gasBufferPercent ?? undefined, calls: [] });
+        }
         const call = { target, calldata, gas: gas === null ? undefined : Number(gas) };
         bursts.at(-1)!.calls.push(call);
         lastBurstId = burstId;

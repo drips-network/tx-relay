@@ -244,7 +244,12 @@ async function cleanUpPendingTxs(): Promise<Tasks> {
 }
 
 type DbSequence = { id: string; bursts: DbBurst[] };
-type DbBurst = { id: number; idxInSequence: number; calls: DbCall[] };
+type DbBurst = {
+  id: number;
+  idxInSequence: number;
+  gasBufferPercent: number | null;
+  calls: DbCall[];
+};
 type DbCall = { target: Address; calldata: Hex; gas: bigint | null };
 
 async function sendNextBatch(lastCheckTime: number = 0): Promise<Tasks> {
@@ -257,6 +262,7 @@ async function sendNextBatch(lastCheckTime: number = 0): Promise<Tasks> {
     sequenceId: sequencesTable.id,
     burstId: burstsTable.id,
     burstIdxInSequence: burstsTable.idxInSequence,
+    gasBufferPercent: burstsTable.gasBufferPercent,
     target: callsTable.target,
     calldata: callsTable.calldata,
     gas: callsTable.gas,
@@ -281,6 +287,7 @@ async function sendNextBatch(lastCheckTime: number = 0): Promise<Tasks> {
       dbSequences.at(-1)!.bursts.push({
         id: dbCall.burstId,
         idxInSequence: dbCall.burstIdxInSequence,
+        gasBufferPercent: dbCall.gasBufferPercent,
         calls: [],
       });
     }
@@ -395,7 +402,11 @@ async function buildNextBatch(dbSequences: DbSequence[]): Promise<
           blockNumber,
           gas: execNextGas,
         });
-        const nextAbiBurst = { needsPrev: burstIdx > 0, gas: nextBurstGas, calls: nextAbiCalls };
+        const nextAbiBurst = {
+          needsPrev: burstIdx > 0,
+          gas: nextBurstGas * (100n + BigInt(dbBurst.gasBufferPercent ?? 0)) / 100n,
+          calls: nextAbiCalls,
+        };
 
         const nextAbiBursts = [...abiBursts, nextAbiBurst];
         onRevert = submittedSequences.length == 0 ? "reject" : "outOfGas";

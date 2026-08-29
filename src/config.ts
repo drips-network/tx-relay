@@ -52,8 +52,8 @@ const configSchema = z.object({
       minGasIncreasePercent: z.number().int().nonnegative().default(10),
       blockTimeMs: z.number().int().nonnegative().default(10_000),
       miningTimeBlocks: z.number().int().nonnegative().default(5),
-    })),
-  })).default([]),
+    })).nonempty(),
+  })).nonempty(),
 });
 
 // All supported chains

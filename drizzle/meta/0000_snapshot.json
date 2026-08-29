@@ -1,5 +1,5 @@
 {
-  "id": "0f48399c-355c-472a-84ea-bd229bf79304",
+  "id": "ca3472e9-4eb7-452a-aba4-34f09250a8c2",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -36,6 +36,12 @@
           "type": "integer",
           "primaryKey": false,
           "notNull": true
+        },
+        "gas_overhead_percent": {
+          "name": "gas_overhead_percent",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
         },
         "state": {
           "name": "state",
