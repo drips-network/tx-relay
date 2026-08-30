@@ -12,7 +12,7 @@ const executorArtifactJson = runCommand("forge", {
   args: ["inspect", "Executor", "artifact"],
   cwd: "contracts",
 });
-const generatedPath = "src/Contracts.generated.ts";
+const generatedPath = "src/contracts.generated.ts";
 Deno.writeTextFileSync(
   generatedPath,
   `

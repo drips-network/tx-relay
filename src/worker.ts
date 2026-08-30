@@ -48,7 +48,7 @@ function matchViemError(
 }
 
 const singletonFactory = "0x914d7Fec6aaC8cd542e72Bca78B30650d45643d7";
-const executorSalt = pad("0x03");
+const executorSalt = pad("0x");
 const executorAddr = getContractAddress({
   from: singletonFactory,
   opcode: "CREATE2",

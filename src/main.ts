@@ -39,13 +39,13 @@ const sendSequencesArgSchema = z.object({
 const sequencesStatesArgSchema = z.object({
   sequences: z.array(z.object({
     id: z.uuid(),
-  })).nonempty(),
+  })).nonempty().max(1_000),
 });
 
 const sequencesConfigArgSchema = z.object({
   sequences: z.array(z.object({
     id: z.uuid(),
-  })).nonempty(),
+  })).nonempty().max(1_000),
 });
 
 async function parseJsonArg<S extends z.ZodTypeAny>(
