@@ -50,7 +50,7 @@ const configSchema = z.object({
       rpcUrls: z.array(z.url()).default([]),
       confirmations: z.number().int().positive().optional(),
       minGasIncreasePercent: z.number().int().nonnegative().optional(),
-      inclusionWaitBlocks: z.number().int().nonnegative().optional(),
+      inclusionWaitBlocks: z.number().int().positive().optional(),
     })).nonempty(),
   })).nonempty(),
 });
@@ -84,9 +84,9 @@ export type ChainConfig = {
   sendNextBatchMinRetryDelayMs: number;
   delayUntilBlockNumberPollingIntervalMs: number;
   waitForBalanceRetryDelayMs: number;
-  burnNonceDelayInitialMs: number,
-  burnNonceDelayMultiplier: number,
-  burnNonceDelayMaxMs: number,
+  burnNonceDelayInitialMs: number;
+  burnNonceDelayMultiplier: number;
+  burnNonceDelayMaxMs: number;
 };
 
 export type ChainConfigs = Record<number, ChainConfig>;

@@ -181,8 +181,9 @@ export async function runWorker(chainConfig: ChainConfig, db: PostgresJsDatabase
     } catch (error) {
       log("Worker crashed with error:", error);
     }
-    log("Worker will restart in 60 seconds");
-    await delay(getChainConfig().workerRestartDelayMs);
+    const { workerRestartDelayMs } = getChainConfig();
+    log("Worker will restart in", workerRestartDelayMs / 1000, "seconds");
+    await delay(workerRestartDelayMs);
   }
 }
 
@@ -628,7 +629,7 @@ async function waitForBalance(minBalance: bigint): Promise<Tasks> {
   if (pendingTxs && !pendingTxs.nextPayload?.isBurn) {
     return [burnNonce, () => waitForBalance(minBalance)];
   }
-  const {client, waitForBalanceRetryDelayMs} = getChainConfig();
+  const { client, waitForBalanceRetryDelayMs } = getChainConfig();
   while (await client.getBalance({ address: client.account.address }) < minBalance) {
     log("Waiting for the balance to be at least", minBalance, "for wallet", client.account.address);
     await delay(waitForBalanceRetryDelayMs);
@@ -686,7 +687,6 @@ async function watchTxs(
 function delayUntilBlockNumber(targetBlockNumber: bigint): Promise<bigint> {
   const { promise, resolve, reject } = Promise.withResolvers<bigint>();
   const unwatch = getClient().watchBlockNumber({
-    emitOnBegin: true,
     poll: true,
     pollingInterval: getChainConfig().delayUntilBlockNumberPollingIntervalMs,
     onBlockNumber: (blockNumber: bigint) => {
