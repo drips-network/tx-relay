@@ -48,10 +48,9 @@ const configSchema = z.object({
     chains: z.array(z.object({
       chainId: z.number().int().positive(),
       rpcUrls: z.array(z.url()).default([]),
-      confirmations: z.number().int().positive().default(1),
-      minGasIncreasePercent: z.number().int().nonnegative().default(10),
-      blockTimeMs: z.number().int().nonnegative().default(10_000),
-      miningTimeBlocks: z.number().int().nonnegative().default(5),
+      confirmations: z.number().int().positive().optional(),
+      minGasIncreasePercent: z.number().int().nonnegative().optional(),
+      inclusionWaitBlocks: z.number().int().nonnegative().optional(),
     })).nonempty(),
   })).nonempty(),
 });
@@ -80,8 +79,14 @@ export type ChainConfig = {
   client: Client;
   confirmations: number;
   minGasIncreasePercent: number;
-  blockTimeMs: number;
-  miningTimeBlocks: number;
+  inclusionWaitBlocks: number;
+  workerRestartDelayMs: number;
+  sendNextBatchMinRetryDelayMs: number;
+  delayUntilBlockNumberPollingIntervalMs: number;
+  waitForBalanceRetryDelayMs: number;
+  burnNonceDelayInitialMs: number,
+  burnNonceDelayMultiplier: number,
+  burnNonceDelayMaxMs: number,
 };
 
 export type ChainConfigs = Record<number, ChainConfig>;
@@ -102,8 +107,19 @@ function getChainConfigsValue(): ChainConfigs {
       if (!chain) throw new Error("Unknown wallet chain ID " + chainId);
       if (chainConfigs[chainId]) throw new Error("Duplicate wallets for chain ID " + chainId);
       const transport = fallback(rpcUrls.length ? rpcUrls.map((url) => http(url)) : [http()]);
-      const client = createWalletClient({ account, chain, transport }).extend(publicActions);
-      chainConfigs[chainId] = { client, ...config };
+      chainConfigs[chainId] = {
+        client: createWalletClient({ account, chain, transport }).extend(publicActions),
+        confirmations: config.confirmations ?? 1,
+        minGasIncreasePercent: config.minGasIncreasePercent ?? 10,
+        inclusionWaitBlocks: config.inclusionWaitBlocks ?? 5,
+        workerRestartDelayMs: 60_000,
+        sendNextBatchMinRetryDelayMs: 1_000,
+        delayUntilBlockNumberPollingIntervalMs: 2_000,
+        waitForBalanceRetryDelayMs: 10_000,
+        burnNonceDelayInitialMs: 1_000,
+        burnNonceDelayMultiplier: 10,
+        burnNonceDelayMaxMs: 60_000,
+      };
     }
   }
   return chainConfigs;

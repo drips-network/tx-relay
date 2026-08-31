@@ -182,7 +182,7 @@ export async function runWorker(chainConfig: ChainConfig, db: PostgresJsDatabase
       log("Worker crashed with error:", error);
     }
     log("Worker will restart in 60 seconds");
-    await delay(60_000);
+    await delay(getChainConfig().workerRestartDelayMs);
   }
 }
 
@@ -253,7 +253,7 @@ type DbBurst = {
 type DbCall = { target: Address; calldata: Hex; gas: bigint | null };
 
 async function sendNextBatch(lastCheckTime: number = 0): Promise<Tasks> {
-  await delay(lastCheckTime + 1_000 - Date.now());
+  await delay(lastCheckTime + getChainConfig().sendNextBatchMinRetryDelayMs - Date.now());
   log("Checking if a new batch needs to be sent");
   const sendNextBatchTask = () => sendNextBatch(Date.now());
 
@@ -570,10 +570,11 @@ async function burnNonce(delayMs?: number): Promise<Tasks> {
   if (!pendingTxs.nextPayload?.isBurn) await registerPendingBurnTx();
 
   log("Burning nonce", pendingTxs.nonce);
-  if (delayMs === undefined) delayMs = 1_000;
+  const config = getChainConfig();
+  if (delayMs === undefined) delayMs = config.burnNonceDelayInitialMs;
   else {
     await delay(delayMs);
-    delayMs = Math.min(delayMs * 10, 60_000);
+    delayMs = Math.min(delayMs * config.burnNonceDelayMultiplier, config.burnNonceDelayMaxMs);
   }
   return sendTxRaw(() => burnNonce(delayMs));
 }
@@ -627,10 +628,10 @@ async function waitForBalance(minBalance: bigint): Promise<Tasks> {
   if (pendingTxs && !pendingTxs.nextPayload?.isBurn) {
     return [burnNonce, () => waitForBalance(minBalance)];
   }
-  const client = getClient();
+  const {client, waitForBalanceRetryDelayMs} = getChainConfig();
   while (await client.getBalance({ address: client.account.address }) < minBalance) {
     log("Waiting for the balance to be at least", minBalance, "for wallet", client.account.address);
-    await delay(10_000);
+    await delay(waitForBalanceRetryDelayMs);
   }
   if (pendingTxs) return watchTxs({ onPending: burnNonce });
 }
@@ -640,42 +641,60 @@ async function watchTxs(
     onPending: Task;
   },
 ): Promise<Tasks> {
-  const { txHashes, nonce } = getPendingTxs();
-  const { client, blockTimeMs, miningTimeBlocks } = getChainConfig();
-  const confirmations = BigInt(getChainConfig().confirmations);
-  let skipOnBlock;
-  for (let attempt = 0; true; attempt++) {
-    log("Watching transactions for nonce", nonce, "attempt", attempt);
-    let receipt;
-    for (const hash of txHashes.toReversed()) {
+  const pendingTxs = getPendingTxs();
+  const config = getChainConfig();
+  const client = config.client;
+  const txHashes = pendingTxs.txHashes.toReversed();
+  const confirmations = BigInt(config.confirmations);
+  let nonceSkipConfirmed = false;
+  const onPendingFromBlock = await client.getBlockNumber() + BigInt(config.inclusionWaitBlocks);
+  retry: while (true) {
+    log("Watching transactions for nonce", pendingTxs.nonce);
+    for (const [hashIdx, hash] of txHashes.entries()) {
+      let receipt;
       try {
         receipt = await client.getTransactionReceipt({ hash });
       } catch (error) {
         if (matchViemError(error, TransactionReceiptNotFoundError)) continue;
         else throw error;
       }
-      if (await client.getBlockNumber() >= receipt.blockNumber + confirmations) {
-        await finalizeTx(receipt);
-        return;
+      const confirmedFromBlock = receipt.blockNumber + confirmations;
+      if (await client.getBlockNumber() >= confirmedFromBlock) {
+        return () => finalizeTx(receipt);
       }
-      break;
+      await delayUntilBlockNumber(confirmedFromBlock);
+      txHashes.splice(hashIdx, 1);
+      txHashes.unshift(hash);
+      nonceSkipConfirmed = false;
+      continue retry;
     }
 
-    if (!receipt && await getNonce() > nonce) {
-      const blockNumber = await client.getBlockNumber();
-      skipOnBlock ??= blockNumber + confirmations;
-      if (blockNumber >= skipOnBlock) {
-        await finalizeTx();
-        return;
-      }
-    } else {
-      skipOnBlock = undefined;
+    if (await getNonce() > pendingTxs.nonce) {
+      if (nonceSkipConfirmed) return finalizeTx;
+      await delayUntilBlockNumber(await client.getBlockNumber() + confirmations);
+      nonceSkipConfirmed = true;
+      continue;
     }
+    nonceSkipConfirmed = false;
 
-    if (!receipt && !skipOnBlock && attempt >= miningTimeBlocks) return onPending;
-
-    await delay(blockTimeMs);
+    const blockNumber = await client.getBlockNumber();
+    if (blockNumber >= onPendingFromBlock) return onPending;
+    await delayUntilBlockNumber(blockNumber + 1n);
   }
+}
+
+function delayUntilBlockNumber(targetBlockNumber: bigint): Promise<bigint> {
+  const { promise, resolve, reject } = Promise.withResolvers<bigint>();
+  const unwatch = getClient().watchBlockNumber({
+    emitOnBegin: true,
+    poll: true,
+    pollingInterval: getChainConfig().delayUntilBlockNumberPollingIntervalMs,
+    onBlockNumber: (blockNumber: bigint) => {
+      if (blockNumber >= targetBlockNumber) resolve(blockNumber);
+    },
+    onError: (error) => reject(error),
+  });
+  return promise.finally(() => unwatch());
 }
 
 async function finalizeTx(receipt?: TransactionReceipt): Promise<undefined> {
