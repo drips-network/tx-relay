@@ -9,7 +9,7 @@ function runCommand(command: string, options: Deno.CommandOptions = {}): string 
 }
 
 const executorArtifactJson = runCommand("forge", {
-  args: ["inspect", "Executor", "artifact"],
+  args: ["inspect", "--force", "Executor", "artifact"],
   cwd: "contracts",
 });
 const generatedPath = "src/contracts.generated.ts";

@@ -61,7 +61,7 @@ contract Executor {
         // forge-lint: disable-next-line(unsafe-typecast)
         if (tx.origin == address(bytes20("Executor - drain gas"))) {
             // Burn all available gas and revert
-            assembly ("memory-safe") { invalid() }
+            while (true) continue;
         }
         for (uint256 i = 0; i < calls.length; i++) {
             Call calldata call = calls[i];

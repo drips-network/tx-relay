@@ -57,6 +57,12 @@ const executorAddr = getContractAddress({
 });
 const burnAddr = getAddress(stringToHex("Nonce burning target"));
 
+const filecoinChainId = 314;
+// Filecoin RPC ignores `gas` field in `eth_call` and always sets the gas limit to this value.
+// This affects visible `gasLeft` inside contract executed with Viem `simulateContract`,
+// and any gas cost measurement made this way must be corrected.
+const filecoinSimulateContractGas = 10_000_000_000n;
+
 type PendingTxs = {
   txSenderId: number;
   nonce: number;
@@ -134,7 +140,7 @@ async function calcExecBaseInclusionGas(): Promise<bigint> {
     to: executorAddr,
     blockNumber,
   });
-  const { result: [emptyExecStartGas] } = await client.simulateContract({
+  let { result: [emptyExecStartGas] } = await client.simulateContract({
     account: client.account,
     abi: executorAbi,
     functionName: "exec",
@@ -143,6 +149,10 @@ async function calcExecBaseInclusionGas(): Promise<bigint> {
     blockNumber,
     gas: emptyExecGas,
   });
+  if (client.chain.id === filecoinChainId) {
+    emptyExecStartGas -= filecoinSimulateContractGas - emptyExecGas;
+    if (emptyExecStartGas <= 0) throw Error("Filecoin base gas report correction failed");
+  }
   return emptyExecGas - emptyExecStartGas;
 }
 
@@ -167,8 +177,8 @@ type Tasks = Task[] | Task | undefined;
 
 export async function runWorker(chainConfig: ChainConfig, db: PostgresJsDatabase) {
   while (true) {
-    try {
-      await workerContext.run({ chainConfig, db }, async () => {
+    await workerContext.run({ chainConfig, db }, async () => {
+      try {
         log("Worker started with a fresh state");
         const tasks: Task[] = [initRelay];
         while (true) {
@@ -177,13 +187,13 @@ export async function runWorker(chainConfig: ChainConfig, db: PostgresJsDatabase
           const newTasks = await task();
           tasks.push(...[newTasks ?? []].flat().reverse());
         }
-      });
-    } catch (error) {
-      log("Worker crashed with error:", error);
-    }
-    const { workerRestartDelayMs } = getChainConfig();
-    log("Worker will restart in", workerRestartDelayMs / 1000, "seconds");
-    await delay(workerRestartDelayMs);
+      } catch (error) {
+        log("Worker crashed with error:", error);
+      }
+      const { workerRestartDelayMs } = getChainConfig();
+      log("Worker will restart in", workerRestartDelayMs / 1000, "seconds");
+      await delay(workerRestartDelayMs);
+    });
   }
 }
 
@@ -392,9 +402,11 @@ async function buildNextBatch(dbSequences: DbSequence[]): Promise<
           }),
           to: executorAddr,
           blockNumber,
+          gasPrice: 0n,
+          prepare: false,
         });
 
-        const { result: nextBurstGas } = await client.simulateContract({
+        let { result: nextBurstGas } = await client.simulateContract({
           account: client.account,
           abi: executorAbi,
           functionName: "execNext",
@@ -403,6 +415,12 @@ async function buildNextBatch(dbSequences: DbSequence[]): Promise<
           blockNumber,
           gas: execNextGas,
         });
+        if (client.chain.id === filecoinChainId) {
+          // The gas measurement is lowered with `* 63 / 64` in the contract,
+          // so the correction must be proportionally lowered too.
+          nextBurstGas -= (filecoinSimulateContractGas - execNextGas) * 63n / 64n;
+          if (nextBurstGas <= 0) throw Error("Filecoin gas reading correction failed");
+        }
         const nextAbiBurst = {
           needsPrev: burstIdx > 0,
           gas: nextBurstGas * (100n + BigInt(dbBurst.gasBufferPercent ?? 0)) / 100n,
@@ -420,10 +438,12 @@ async function buildNextBatch(dbSequences: DbSequence[]): Promise<
           }),
           to: executorAddr,
           blockNumber,
+          gasPrice: 0n,
+          prepare: false,
         });
 
         if (onRevert === "outOfGas") onRevert = "skip";
-        const { result: gasReport } = await client.simulateContract({
+        let { result: gasReport } = await client.simulateContract({
           account: client.account,
           abi: executorAbi,
           functionName: "exec",
@@ -433,6 +453,13 @@ async function buildNextBatch(dbSequences: DbSequence[]): Promise<
           gas: nextExecGas,
         });
         if (!gasReport.every((gas) => gas > 0n)) throw new ExecutionRevertedError();
+        if (client.chain.id === filecoinChainId) {
+          gasReport = gasReport.map((gas) => {
+            gas -= filecoinSimulateContractGas - nextExecGas;
+            if (gas <= 0) throw Error("Filecoin gas report correction failed");
+            return gas;
+          });
+        }
 
         // Gas left when the sequence was starting execution, without any calldata overhead.
         // It may be much more than is actually needed, but it's guaranteed
