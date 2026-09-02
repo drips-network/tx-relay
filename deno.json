@@ -5,13 +5,14 @@
     "start-dev": "deno task --env-file start",
     "contracts-generate": "deno run --allow-read=contracts,src --allow-write=src --allow-run=forge,deno src/generate-contracts.ts",
     "drizzle-kit": "deno run --allow-write=drizzle --allow-net --allow-sys=homedir --allow-env --env-file --allow-read npm:drizzle-kit",
-    "drizzle-generate": "deno task drizzle-kit generate"
+    "drizzle-generate": "deno task drizzle-kit generate",
+    "test-integration": "deno test --allow-run=deno --allow-net --allow-env tests/integration"
   },
   "imports": {
     "drizzle-kit": "npm:drizzle-kit@^0.31.10",
     "drizzle-orm": "npm:drizzle-orm@^0.45.2",
     "oak": "jsr:@oak/oak@^17.2.0",
-    "assert": "jsr:@std/assert@^1.0.19",
+    "@std/assert": "jsr:@std/assert@^1.0.19",
     "async": "jsr:@std/async@^1.5.0",
     "postgres": "npm:postgres@^3.4.9",
     "viem": "jsr:@wevm/viem@^2.48.1",
