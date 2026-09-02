@@ -3,7 +3,7 @@
   "tasks": {
     "start": "deno run --allow-read=drizzle --allow-net --allow-sys=uid,gid,userInfo --allow-env --env-file src/main.ts",
     "start-dev": "deno task --env-file start",
-    "contracts-generate": "deno run --allow-read=contracts,src --allow-write=src --allow-run=forge,deno src/generate-contracts.ts",
+    "contracts-generate": "deno run --allow-read=contracts,src --allow-write=src,tests --allow-run=forge,deno src/generate-contracts.ts",
     "drizzle-kit": "deno run --allow-write=drizzle --allow-net --allow-sys=homedir --allow-env --env-file --allow-read npm:drizzle-kit",
     "drizzle-generate": "deno task drizzle-kit generate",
     "test-integration": "deno test --allow-run=deno --allow-net --allow-env tests/integration"

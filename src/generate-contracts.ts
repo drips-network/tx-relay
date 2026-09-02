@@ -8,20 +8,29 @@ function runCommand(command: string, options: Deno.CommandOptions = {}): string 
   return new TextDecoder().decode(stdout).trim();
 }
 
-const executorArtifactJson = runCommand("forge", {
-  args: ["inspect", "--force", "Executor", "artifact"],
-  cwd: "contracts",
-});
-const generatedPath = "src/contracts.generated.ts";
-Deno.writeTextFileSync(
-  generatedPath,
-  `
-    // DO NOT EDIT, code generated with task \`generate-contracts\`
-    import type { Abi, Hex } from "viem";
+function runDeno(...args: string[]) {
+  runCommand(Deno.execPath(), { args });
+}
 
-    const executorArtifact = ${executorArtifactJson} as const;
-    export const executorAbi = executorArtifact.abi satisfies Abi;
-    export const executorBytecode = executorArtifact.bytecode.object satisfies Hex;
-  `,
-);
-runCommand(Deno.execPath(), { args: ["fmt", generatedPath] });
+function generateArtifact(contractName: string, outputPath: string) {
+  const artifactJson = runCommand("forge", {
+    args: ["inspect", "--force", contractName, "artifact"],
+    cwd: "contracts",
+  });
+  Deno.writeTextFileSync(
+    outputPath,
+    `
+      // DO NOT EDIT, code generated with task \`generate-contracts\`
+      import type { Abi, Hex } from "viem";
+
+      const artifact = ${artifactJson} as const;
+      export const abi = artifact.abi satisfies Abi;
+      export const bytecode = artifact.bytecode.object satisfies Hex;
+    `,
+  );
+  runDeno("fmt", outputPath);
+  runDeno("check", outputPath);
+}
+
+generateArtifact("Executor", "src/executor.generated.ts");
+generateArtifact("Counter", "tests/integration/counter.generated.ts");

@@ -1,6 +1,5 @@
 import { delay } from "async";
 import {
-  Abi,
   Address,
   BaseError,
   concat,
@@ -36,7 +35,7 @@ import {
   txsTable,
 } from "./db/schema.ts";
 import { ChainConfig, Client } from "./config.ts";
-import { executorAbi, executorBytecode } from "./contracts.generated.ts";
+import { abi as executorAbi, bytecode as executorBytecode } from "./executor.generated.ts";
 
 function matchViemError(
   error: unknown,

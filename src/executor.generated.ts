@@ -1,7 +1,7 @@
 // DO NOT EDIT, code generated with task `generate-contracts`
 import type { Abi, Hex } from "viem";
 
-const executorArtifact = {
+const artifact = {
   "abi": [
     {
       "type": "function",
@@ -434,5 +434,5 @@ const executorArtifact = {
   },
   "id": 0,
 } as const;
-export const executorAbi = executorArtifact.abi satisfies Abi;
-export const executorBytecode = executorArtifact.bytecode.object satisfies Hex;
+export const abi = artifact.abi satisfies Abi;
+export const bytecode = artifact.bytecode.object satisfies Hex;
