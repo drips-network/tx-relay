@@ -15,33 +15,6 @@ import {
 import { privateKeyToAccount } from "viem/accounts";
 import * as viemChains from "viem/chains";
 
-// DB URL configuration
-
-export function getDbUrl(): string {
-  return dbUrl ??= z.url().default("postgres://user:password@localhost:5432/tx_relay")
-    .parse(Deno.env.get("DB_URL"));
-}
-
-let dbUrl: string | undefined;
-
-// Port number configuration
-
-export function getPort(): number {
-  return port ??= z.coerce.number().int().positive().default(8000).parse(Deno.env.get("PORT"));
-}
-
-let port: number | undefined;
-
-// App configuration in raw form as provided by the user
-
-type Config = z.infer<typeof configSchema>;
-
-function getConfig(): Config {
-  return config ??= configSchema.parse(JSON.parse(Deno.env.get("CONFIG") ?? "{}"));
-}
-
-let config: Config | undefined;
-
 const configSchema = z.object({
   wallets: z.array(z.object({
     privateKey: z.custom<Hex>((s) => isHex(s) && s.length === 66, "Not a 32-byte hex value"),
@@ -55,24 +28,21 @@ const configSchema = z.object({
   })).nonempty(),
 });
 
-// All supported chains
-type Chains = Map<number, Chain>;
+const testConfigSchema = z.object({
+  workerRestartDelayMs: z.number().nonnegative().optional(),
+  sendNextBatchMinRetryDelayMs: z.number().nonnegative().optional(),
+  delayUntilBlockNumberPollingIntervalMs: z.number().nonnegative().optional(),
+  waitForBalanceRetryDelayMs: z.number().nonnegative().optional(),
+  burnNonceDelayInitialMs: z.number().nonnegative().optional(),
+  burnNonceDelayMultiplier: z.number().nonnegative().optional(),
+  burnNonceDelayMaxMs: z.number().nonnegative().optional(),
+});
 
-function getChains(): Chains {
-  return chains ??= Object.entries(viemChains)
-    // Sort by chain names used in Viem as keys, lexically descending
-    .sort(([chainA], [chainB]) => -chainA.localeCompare(chainB))
-    // Resolve duplicate chain IDs by keeping the one from the lexically first key e.g. suffix-free.
-    .reduce<Chains>((map, [, chain]) => map.set(chain.id, chain), new Map());
-}
-
-let chains: Chains | undefined;
-
-// Chains configuration
-
-export type Client =
-  & WalletClient<Transport, Chain, PrivateKeyAccount>
-  & PublicClient<Transport, Chain, PrivateKeyAccount>;
+export type Config = {
+  dbUrl: string;
+  port: number;
+  chainConfigs: Map<number, ChainConfig>;
+};
 
 export type ChainConfig = {
   client: Client;
@@ -88,38 +58,50 @@ export type ChainConfig = {
   burnNonceDelayMaxMs: number;
 };
 
-export type ChainConfigs = Record<number, ChainConfig>;
+export type Client =
+  & WalletClient<Transport, Chain, PrivateKeyAccount>
+  & PublicClient<Transport, Chain, PrivateKeyAccount>;
 
-export function getChainConfigs(): ChainConfigs {
-  return chainConfigs ??= getChainConfigsValue();
-}
+export function getConfig(): Config {
+  const dbUrl = getDbUrl();
+  const port = z.coerce.number().int().positive().default(8000).parse(Deno.env.get("PORT"));
+  const config = configSchema.parse(JSON.parse(Deno.env.get("CONFIG") ?? "{}"));
+  const testConfig = testConfigSchema.parse(JSON.parse(Deno.env.get("TEST_CONFIG") ?? "{}"));
 
-let chainConfigs: ChainConfigs | undefined;
+  const chains = Object.entries(viemChains)
+    // Sort by chain names used in Viem as keys, lexically descending
+    .sort(([chainA], [chainB]) => -chainA.localeCompare(chainB))
+    // Resolve duplicate chain IDs by keeping the one from the lexically first key e.g. suffix-free.
+    .reduce((map, [, chain]) => map.set(chain.id, chain), new Map<number, Chain>());
 
-function getChainConfigsValue(): ChainConfigs {
-  const chains = getChains();
-  const chainConfigs: ChainConfigs = {};
-  for (const wallet of getConfig().wallets) {
+  const chainConfigs = new Map<number, ChainConfig>();
+  for (const wallet of config.wallets) {
     const account = privateKeyToAccount(wallet.privateKey);
     for (const { chainId, rpcUrls, ...config } of wallet.chains) {
       const chain = chains.get(chainId);
       if (!chain) throw new Error("Unknown wallet chain ID " + chainId);
-      if (chainConfigs[chainId]) throw new Error("Duplicate wallets for chain ID " + chainId);
+      if (chainConfigs.has(chainId)) throw new Error("Duplicate wallets for chain ID " + chainId);
       const transport = fallback(rpcUrls.length ? rpcUrls.map((url) => http(url)) : [http()]);
-      chainConfigs[chainId] = {
+      chainConfigs.set(chainId, {
         client: createWalletClient({ account, chain, transport }).extend(publicActions),
         confirmations: config.confirmations ?? 1,
         minGasIncreasePercent: config.minGasIncreasePercent ?? 10,
         inclusionWaitBlocks: config.inclusionWaitBlocks ?? 5,
-        workerRestartDelayMs: 60_000,
-        sendNextBatchMinRetryDelayMs: 1_000,
-        delayUntilBlockNumberPollingIntervalMs: 2_000,
-        waitForBalanceRetryDelayMs: 10_000,
-        burnNonceDelayInitialMs: 1_000,
-        burnNonceDelayMultiplier: 10,
-        burnNonceDelayMaxMs: 60_000,
-      };
+        workerRestartDelayMs: testConfig.workerRestartDelayMs ?? 60_000,
+        sendNextBatchMinRetryDelayMs: testConfig.sendNextBatchMinRetryDelayMs ?? 1_000,
+        delayUntilBlockNumberPollingIntervalMs: testConfig.delayUntilBlockNumberPollingIntervalMs ??
+          2_000,
+        waitForBalanceRetryDelayMs: testConfig.waitForBalanceRetryDelayMs ?? 10_000,
+        burnNonceDelayInitialMs: testConfig.burnNonceDelayInitialMs ?? 1_000,
+        burnNonceDelayMultiplier: testConfig.burnNonceDelayMultiplier ?? 10,
+        burnNonceDelayMaxMs: testConfig.burnNonceDelayMaxMs ?? 60_000,
+      });
     }
   }
-  return chainConfigs;
+  return { dbUrl, port, chainConfigs };
+}
+
+export function getDbUrl(): string {
+  return z.url().default("postgres://user:password@localhost:5432/tx_relay")
+    .parse(Deno.env.get("DB_URL"));
 }

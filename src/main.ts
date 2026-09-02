@@ -13,22 +13,24 @@ import {
   sequenceEventToDbValue,
   sequencesTable,
 } from "./db/schema.ts";
-import { getChainConfigs, getDbUrl, getPort } from "./config.ts";
+import { getConfig } from "./config.ts";
 import { runWorker } from "./worker.ts";
 
-const chainConfigs = getChainConfigs();
+const config = getConfig();
 
-const db = drizzle({ connection: getDbUrl(), casing: "snake_case" });
+const db = drizzle({ connection: config.dbUrl, casing: "snake_case" });
 await migrate(db, { migrationsFolder: "./drizzle" });
 
 const runningSince = new Date();
-const workersHealth = Object.values(chainConfigs)
+const workersHealth = config.chainConfigs.values()
   .map((chainConfig) => runWorker(chainConfig, db))
+  .toArray()
   .sort((workerA, workerB) => workerA.name.localeCompare(workerB.name));
 
 const sendSequencesArgSchema = z.object({
   sequences: z.array(z.object({
-    chainId: z.number().refine((chainId) => chainConfigs[chainId], "Unsupported chain ID"),
+    chainId: z.number()
+      .refine((chainId) => config.chainConfigs.has(chainId), "Unsupported chain ID"),
     bursts: z.array(z.object({
       gasBufferPercent: z.number().int().nonnegative().optional(),
       calls: z.array(z.object({
@@ -216,4 +218,4 @@ router
 await new Application()
   .use(router.routes())
   .use(router.allowedMethods())
-  .listen({ port: getPort(), hostname: "[::]" });
+  .listen({ port: config.port, hostname: "[::]" });
