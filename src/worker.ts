@@ -167,34 +167,49 @@ async function calcBurnGas(): Promise<bigint> {
   return await client.estimateGas({ account: client.account, to: burnAddr });
 }
 
+function workerName(chainConfig?: ChainConfig): string {
+  return chainConfig?.client.chain.name ?? "main";
+}
+
 function log(...message: unknown[]) {
-  const worker = workerContext.getStore()?.chainConfig.client.chain.name ?? "main";
-  console.log(`${new Date().toISOString()} [${worker}]:`, ...message);
+  const name = workerName(workerContext.getStore()?.chainConfig);
+  console.log(`${new Date().toISOString()} [${name}]:`, ...message);
 }
 
 type Task = () => Promise<Tasks>;
 type Tasks = Task[] | Task | undefined;
 
-export async function runWorker(chainConfig: ChainConfig, db: PostgresJsDatabase) {
-  while (true) {
-    await workerContext.run({ chainConfig, db }, async () => {
-      try {
-        log("Worker started with a fresh state");
-        const tasks: Task[] = [initRelay];
-        while (true) {
-          const task = tasks.pop();
-          if (!task) throw Error("Task queue empty");
-          const newTasks = await task();
-          tasks.push(...[newTasks ?? []].flat().reverse());
+type WorkerHealth = {
+  name: string;
+  runningSince: Date | null;
+};
+
+export function runWorker(chainConfig: ChainConfig, db: PostgresJsDatabase): WorkerHealth {
+  const workerHealth: WorkerHealth = { name: workerName(chainConfig), runningSince: null };
+  (async () => {
+    while (true) {
+      await workerContext.run({ chainConfig, db }, async () => {
+        try {
+          workerHealth.runningSince = new Date();
+          log("Worker started with a fresh state");
+          const tasks: Task[] = [initRelay];
+          while (true) {
+            const task = tasks.pop();
+            if (!task) throw Error("Task queue empty");
+            const newTasks = await task();
+            tasks.push(...[newTasks ?? []].flat().reverse());
+          }
+        } catch (error) {
+          workerHealth.runningSince = null;
+          log("Worker crashed with error:", error);
         }
-      } catch (error) {
-        log("Worker crashed with error:", error);
-      }
-      const { workerRestartDelayMs } = getChainConfig();
-      log("Worker will restart in", workerRestartDelayMs / 1000, "seconds");
-      await delay(workerRestartDelayMs);
-    });
-  }
+        const { workerRestartDelayMs } = getChainConfig();
+        log("Worker will restart in", workerRestartDelayMs / 1000, "seconds");
+        await delay(workerRestartDelayMs);
+      });
+    }
+  })();
+  return workerHealth;
 }
 
 async function initRelay(): Promise<Tasks> {

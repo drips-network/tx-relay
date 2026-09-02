@@ -16,11 +16,15 @@ import {
 import { getChainConfigs, getDbUrl, getPort } from "./config.ts";
 import { runWorker } from "./worker.ts";
 
+const chainConfigs = getChainConfigs();
+
 const db = drizzle({ connection: getDbUrl(), casing: "snake_case" });
 await migrate(db, { migrationsFolder: "./drizzle" });
 
-const chainConfigs = getChainConfigs();
-for (const chainConfig of Object.values(chainConfigs)) runWorker(chainConfig, db);
+const runningSince = new Date();
+const workersHealth = Object.values(chainConfigs)
+  .map((chainConfig) => runWorker(chainConfig, db))
+  .sort((workerA, workerB) => workerA.name.localeCompare(workerB.name));
 
 const sendSequencesArgSchema = z.object({
   sequences: z.array(z.object({
@@ -64,6 +68,9 @@ async function parseJsonArg<S extends z.ZodTypeAny>(
 
 const router = new Router();
 router
+  .get("/health", (context) => {
+    context.response.body = { runningSince, workers: workersHealth };
+  })
   .post("/send-sequences", async (context) => {
     const arg = await parseJsonArg(context, sendSequencesArgSchema);
 

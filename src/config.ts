@@ -56,7 +56,6 @@ const configSchema = z.object({
 });
 
 // All supported chains
-//
 type Chains = Map<number, Chain>;
 
 function getChains(): Chains {
