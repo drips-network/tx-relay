@@ -1,131 +1,91 @@
-import { afterAll, beforeAll, beforeEach, it } from "@std/testing/bdd";
-import { retry } from "async";
-import { assert, assertEquals } from "@std/assert";
-import { type Address, createWalletClient, encodeFunctionData, http, publicActions } from "viem";
+import { assertEquals } from "@std/assert";
+import { type Address } from "viem";
 import { foundry } from "viem/chains";
-import { privateKeyToAccount } from "viem/accounts";
-import { abi as counterAbi, bytecode as counterBytecode } from "./counter.generated.ts";
-import { port, startApp, stopApp, walletPrivateKey } from "./app.ts";
+import { abi as counterAbi } from "./counter.generated.ts";
+import { confirmations, sendSequence, startApp, stopApp, waitForSequenceState } from "./app.ts";
 import {
+  addCalldata,
   anvilClient,
+  deployCounter,
   etchSingletonFactory,
-  mineConfirmations,
   resetToGenesis,
-  waitForNextBlock,
+  waitForBlockNumber,
 } from "./anvil.ts";
 import { resetDb } from "./db.ts";
 
-const client = createWalletClient({
-  account: privateKeyToAccount(walletPrivateKey),
-  chain: foundry,
-  transport: http(),
-}).extend(publicActions);
-
 let counterAddress: Address;
 let checkpointId: `0x${string}`;
+let app: Deno.ChildProcess;
 
-beforeAll(async () => {
+async function mineConfirmations() {
+  await anvilClient.mine({ blocks: confirmations });
+}
+
+Deno.test.beforeAll(async () => {
   await resetToGenesis();
   await etchSingletonFactory();
 
-  const deployHash = await client.deployContract({ abi: counterAbi, bytecode: counterBytecode });
-  const receipt = await client.waitForTransactionReceipt({ hash: deployHash });
-  assert(receipt.contractAddress, "Counter was not deployed");
-  counterAddress = receipt.contractAddress;
-
-  checkpointId = await anvilClient.snapshot();
+  counterAddress = await deployCounter();
 });
 
-beforeEach(async () => {
+Deno.test.beforeEach(async () => {
   await resetDb();
-  // viem's `revert` action discards `evm_revert`'s boolean result, so it's called directly.
-  const reverted = await anvilClient.request({ method: "evm_revert", params: [checkpointId] });
-  assert(reverted, "checkpoint revert failed");
-  // Reverting consumes the snapshot, so re-snapshot immediately to reuse it for the next test.
+  if (checkpointId) await anvilClient.revert({ id: checkpointId });
   checkpointId = await anvilClient.snapshot();
+
+  // The app also carries its own in-memory state (e.g. transactions it believes are still
+  // in-flight), which no individual test can be trusted to leave clean, so it's restarted
+  // fresh here rather than relying on each test to manage its own lifecycle correctly.
+  const blockNumberBeforeApp = await anvilClient.getBlockNumber();
+  app = await startApp();
+  // Every test starts from the checkpoint taken right after the Counter was deployed, so the
+  // Executor is never deployed yet and this app instance always has to (re)deploy it here,
+  // which needs confirming before the relay can make any further progress.
+  await waitForBlockNumber(blockNumberBeforeApp + 1n);
+  await mineConfirmations();
 });
 
-afterAll(async () => {
-  await resetToGenesis();
-});
-
-it("smoke: app starts up and its worker connects to the chain", async () => {
-  const app = await startApp({
-    wallets: [{ privateKey: walletPrivateKey, chains: [{ chainId: foundry.id }] }],
-  });
+Deno.test.afterEach(async () => {
   await stopApp(app);
 });
 
-async function sendSequence(target: Address, value: number): Promise<string> {
-  const calldata = encodeFunctionData({
-    abi: counterAbi,
-    functionName: "add",
-    args: [BigInt(value)],
-  });
-  const response = await fetch(`http://localhost:${port}/send-sequences`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      sequences: [{ chainId: foundry.id, bursts: [{ calls: [{ target, calldata }] }] }],
-    }),
-  });
-  assert(response.ok, `/send-sequences returned ${response.status}`);
-  const { sequences: [{ id }] } = await response.json();
-  return id;
-}
+Deno.test.afterAll(async () => {
+  await resetToGenesis();
+});
 
-// deno-lint-ignore no-explicit-any
-async function waitForSequenceState(id: string): Promise<any> {
-  return await retry(async () => {
-    const response = await fetch(`http://localhost:${port}/sequences-states`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sequences: [{ id }] }),
-    });
-    assert(response.ok, `/sequences-states returned ${response.status}`);
-    const { sequences: [state] } = await response.json();
-    assert(state.pending === 0, "sequence still has pending bursts");
-    return state;
-  }, { minTimeout: 50, maxTimeout: 50, multiplier: 1, maxAttempts: 300 });
-}
+Deno.test({
+  name: "smoke: app starts up and its worker connects to the chain",
+  timeout: 30_000,
+  // `beforeEach` already asserts this by successfully starting the app - nothing further to do.
+  fn() {},
+});
 
-it("send-sequences: executes a successful call and rejects a reverting one", async () => {
-  const blockNumberBeforeApp = await client.getBlockNumber({ cacheTime: 0 });
-  const app = await startApp({
-    wallets: [{ privateKey: walletPrivateKey, chains: [{ chainId: foundry.id }] }],
-  });
-
-  try {
-    // Every test starts from the checkpoint taken right after the Counter was deployed, so the
-    // Executor is never deployed yet and this app instance always has to (re)deploy it here,
-    // which needs confirming before the relay can make any further progress.
-    await waitForNextBlock(blockNumberBeforeApp, 200);
-    await mineConfirmations();
-
+Deno.test({
+  name: "send-sequences: executes a successful call and rejects a reverting one",
+  timeout: 30_000,
+  async fn() {
     // A sequence whose only burst reverts is rejected outright, without ever being submitted
-    // on-chain, so it must be awaited in isolation before any other sequence is sent -
-    // once something else is accepted into the same batch, a later revert is just left
-    // pending for a retry instead of being rejected.
-    const revertingId = await sendSequence(counterAddress, 0);
+    // on-chain, so it must be awaited in isolation before any other sequence is sent - once
+    // something else is accepted into the same batch, a later revert is just left pending for
+    // a retry instead of being rejected.
+    const revertingId = await sendSequence(foundry.id, counterAddress, addCalldata(0));
     const revertingState = await waitForSequenceState(revertingId);
     assertEquals(revertingState.successes, 0);
     assertEquals(revertingState.failures, 1);
 
-    const blockNumberBeforeSuccess = await client.getBlockNumber({ cacheTime: 0 });
-    const successId = await sendSequence(counterAddress, 5);
-    await waitForNextBlock(blockNumberBeforeSuccess);
+    const blockNumberBeforeSuccess = await anvilClient.getBlockNumber();
+    const successId = await sendSequence(foundry.id, counterAddress, addCalldata(5));
+    await waitForBlockNumber(blockNumberBeforeSuccess + 1n);
     await mineConfirmations();
     const successState = await waitForSequenceState(successId);
     assertEquals(successState.successes, 1);
     assertEquals(successState.failures, 0);
 
-    const count = await client.readContract({
+    const count = await anvilClient.readContract({
       address: counterAddress,
       abi: counterAbi,
       functionName: "count",
     });
     assertEquals(count, 5n);
-  } finally {
-    await stopApp(app);
-  }
+  },
 });

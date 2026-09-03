@@ -728,14 +728,13 @@ async function watchTxs(
 function delayUntilBlockNumber(targetBlockNumber: bigint): Promise<bigint> {
   const { promise, resolve, reject } = Promise.withResolvers<bigint>();
   const unwatch = getClient().watchBlockNumber({
-    poll: true,
     pollingInterval: getChainConfig().delayUntilBlockNumberPollingIntervalMs,
-    onBlockNumber: (blockNumber: bigint) => {
+    onBlockNumber(blockNumber) {
       if (blockNumber >= targetBlockNumber) resolve(blockNumber);
     },
-    onError: (error) => reject(error),
+    onError: reject,
   });
-  return promise.finally(() => unwatch());
+  return promise.finally(unwatch);
 }
 
 async function finalizeTx(receipt?: TransactionReceipt): Promise<undefined> {

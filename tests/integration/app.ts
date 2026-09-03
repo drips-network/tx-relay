@@ -1,16 +1,21 @@
 import { retry } from "async";
 import { assert } from "@std/assert";
-import { Hex } from "viem";
+import { Address, Hex } from "viem";
+import { foundry } from "viem/chains";
 
-// Anvil's default account #0, pre-funded with test ETH.
-export const walletPrivateKey: Hex =
+// Anvil's default account #0, pre-funded with test ETH. This is the wallet the app's own
+// worker uses to send transactions - tests must never use it for their own on-chain setup
+// (e.g. deploying fixtures), since that would consume nonces the worker doesn't know about
+// and desync its nonce tracking. Use `anvil.ts`'s `maintenanceClient` for that instead.
+export const workerPrivateKey: Hex =
   "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 
 export const port = 8000;
 
-type Config = {
-  wallets: { privateKey: Hex; chains: { chainId: number }[] }[];
-};
+// Passed explicitly into the worker's chain config below, rather than relying on the app's own
+// default, so callers needing to mine confirming blocks (e.g. `relay.test.ts`) have one shared,
+// explicit source of truth for how many are required instead of an assumed/hardcoded number.
+export const confirmations = 1;
 
 // Minimizes every worker delay/poll cadence, trading CPU usage for latency, so tests aren't
 // stuck waiting out multi-second production defaults (e.g. the 1s batch-retry or 2s block-poll
@@ -25,7 +30,10 @@ const testConfig = {
   burnNonceDelayMaxMs: 1,
 };
 
-export async function startApp(config: Config): Promise<Deno.ChildProcess> {
+export async function startApp(): Promise<Deno.ChildProcess> {
+  const config = {
+    wallets: [{ privateKey: workerPrivateKey, chains: [{ chainId: foundry.id, confirmations }] }],
+  };
   const command = new Deno.Command("deno", {
     args: ["task", "start"],
     cwd: new URL("../..", import.meta.url),
@@ -55,4 +63,36 @@ export async function startApp(config: Config): Promise<Deno.ChildProcess> {
 export async function stopApp(app: Deno.ChildProcess) {
   app.kill("SIGTERM");
   await app.status;
+}
+
+export async function sendSequence(
+  chainId: number,
+  target: Address,
+  calldata: Hex,
+): Promise<string> {
+  const response = await fetch(`http://localhost:${port}/send-sequences`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      sequences: [{ chainId, bursts: [{ calls: [{ target, calldata }] }] }],
+    }),
+  });
+  assert(response.ok, `/send-sequences returned ${response.status}`);
+  const { sequences: [{ id }] } = await response.json();
+  return id;
+}
+
+// deno-lint-ignore no-explicit-any
+export async function waitForSequenceState(id: string): Promise<any> {
+  return await retry(async () => {
+    const response = await fetch(`http://localhost:${port}/sequences-states`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sequences: [{ id }] }),
+    });
+    assert(response.ok, `/sequences-states returned ${response.status}`);
+    const { sequences: [state] } = await response.json();
+    assert(state.pending === 0, "sequence still has pending bursts");
+    return state;
+  }, { minTimeout: 50, maxTimeout: 50, multiplier: 1, maxAttempts: 300 });
 }
