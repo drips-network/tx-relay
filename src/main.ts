@@ -8,18 +8,22 @@ import {
   burstsTable,
   callsTable,
   dbValueToSequenceEvent,
-  type SequenceEvent,
+  sequenceEventSchema,
   sequenceEventsTable,
   sequenceEventToDbValue,
   sequencesTable,
 } from "./db/schema.ts";
 import { getConfig } from "./config.ts";
-import { runWorker, type WorkerHealth } from "./worker.ts";
+import { runWorker } from "./worker.ts";
 
-export type Health = {
-  runningSince: Date;
-  workers: WorkerHealth[];
-};
+export const healthSchema = z.object({
+  runningSince: z.coerce.date(),
+  workers: z.array(z.object({
+    name: z.string(),
+    runningSince: z.coerce.date().nullable(),
+  })),
+});
+export type Health = z.infer<typeof healthSchema>;
 
 const sendSequencesArgSchema = z.object({
   sequences: z.array(z.object({
@@ -37,29 +41,30 @@ const sendSequencesArgSchema = z.object({
 });
 export type SendSequencesArg = z.infer<typeof sendSequencesArgSchema>;
 
-export type CreatedSequence = {
-  id: string;
-};
-export type SendSequences = {
-  sequences: CreatedSequence[];
-};
+const sendSequencesSchema = z.object({
+  sequences: z.array(z.object({
+    id: z.uuid(),
+  })).nonempty(),
+});
+export type SendSequences = z.infer<typeof sendSequencesSchema>;
 
 const sequencesStatesArgSchema = z.object({
   sequences: z.array(z.object({
     id: z.uuid(),
   })).nonempty().max(1_000),
 });
-export type SequenceStatesArg = z.infer<typeof sequencesStatesArgSchema>;
+export type SequencesStatesArg = z.infer<typeof sequencesStatesArgSchema>;
 
-export type SequenceStates = {
-  sequences: {
-    id: string;
-    pending: number;
-    successes: number;
-    failures: number;
-    events: (SequenceEvent & { timestamp: Date })[];
-  }[];
-};
+export const sequencesStatesSchema = z.object({
+  sequences: z.array(z.object({
+    id: z.uuid(),
+    pending: z.number().int().nonnegative(),
+    successes: z.number().int().nonnegative(),
+    failures: z.number().int().nonnegative(),
+    events: z.array(z.intersection(sequenceEventSchema, z.object({ timestamp: z.coerce.date() }))),
+  })).nonempty(),
+});
+export type SequencesStates = z.infer<typeof sequencesStatesSchema>;
 
 const sequencesConfigsArgSchema = z.object({
   sequences: z.array(z.object({
@@ -68,15 +73,20 @@ const sequencesConfigsArgSchema = z.object({
 });
 export type SequencesConfigsArg = z.infer<typeof sequencesConfigsArgSchema>;
 
-export type SequencesConfigs = {
-  sequences: {
-    chainId: number;
-    bursts: {
-      gasBufferPercent?: number;
-      calls: { target: Hex; calldata: Hex; gas: number | undefined }[];
-    }[];
-  }[];
-};
+export const sequencesConfigsSchema = z.object({
+  sequences: z.array(z.object({
+    chainId: z.number().int().positive(),
+    bursts: z.array(z.object({
+      gasBufferPercent: z.number().int().nonnegative().optional(),
+      calls: z.array(z.object({
+        target: z.custom<Address>().refine(isAddress, "Not an address"),
+        calldata: z.custom<Hex>().refine((s) => isHex(s) && s.length % 2 == 0, "Not a hex value"),
+        gas: z.number().int().positive().optional(),
+      })).nonempty(),
+    })).nonempty(),
+  })).nonempty(),
+});
+export type SequencesConfigs = z.infer<typeof sequencesConfigsSchema>;
 
 async function parseJsonArg<S extends z.ZodTypeAny>(
   context: Context,
@@ -106,7 +116,10 @@ const workersHealth = config.chainConfigs.values()
 const router = new Router();
 router
   .get("/health", (context) => {
-    context.response.body = { runningSince, workers: workersHealth } satisfies Health;
+    context.response.body = {
+      runningSince,
+      workers: workersHealth.map(({ name, runningSince }) => ({ name, runningSince })),
+    } satisfies Health;
   })
   .post("/send-sequences", async (context) => {
     const arg = await parseJsonArg(context, sendSequencesArgSchema);
@@ -203,7 +216,7 @@ router
           }));
         return { id, pending, successes, failures, events };
       });
-      context.response.body = { sequences } satisfies SequenceStates;
+      context.response.body = { sequences } satisfies SequencesStates;
     });
   }).post("/sequences-configs", async (context) => {
     const arg = await parseJsonArg(context, sequencesConfigsArgSchema);

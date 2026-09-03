@@ -99,7 +99,7 @@ const sequenceEventSkippedSchema = z.object({
   details: z.object({}),
 });
 
-const sequenceEventSchema = z.discriminatedUnion("kind", [
+export const sequenceEventSchema = z.discriminatedUnion("kind", [
   sequenceEventCreatedSchema,
   sequenceEventRejectedSchema,
   sequenceEventSubmittedSchema,
