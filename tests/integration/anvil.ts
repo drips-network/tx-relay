@@ -1,4 +1,3 @@
-import { delay } from "async";
 import { assert } from "@std/assert";
 import {
   type Address,
@@ -40,18 +39,6 @@ export async function resetToGenesis() {
 
 export async function etchSingletonFactory() {
   await anvilClient.setCode({ address: singletonFactory, bytecode: singletonFactoryBytecode });
-}
-
-// Anvil only mines a block when a transaction is submitted, so a transaction's confirmations
-// never advance on their own. Callers should trigger a transaction, wait for the chain to reach
-// the block it should be published in with `waitForBlockNumber`, then mine a confirming block
-// with `anvilClient.mine({ blocks: 1 })` (the app defaults to requiring 1 confirmation - see
-// `confirmations` in `src/config.ts`). Polls unboundedly - relies on the test's own timeout to
-// fail if the chain never reaches it.
-export async function waitForBlockNumber(blockNumber: bigint) {
-  while (await anvilClient.getBlockNumber() < blockNumber) {
-    await delay(10);
-  }
 }
 
 // Deploys the Counter test fixture from the maintenance wallet and returns its address.
