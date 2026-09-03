@@ -1,15 +1,7 @@
-import { assert } from "@std/assert";
-import {
-  type Address,
-  createTestClient,
-  encodeFunctionData,
-  http,
-  publicActions,
-  walletActions,
-} from "viem";
+import { delay } from "async";
+import { createTestClient, http, publicActions, walletActions } from "viem";
 import { foundry } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
-import { abi as counterAbi, bytecode as counterBytecode } from "./counter.generated.ts";
 
 const singletonFactory = "0x914d7Fec6aaC8cd542e72Bca78B30650d45643d7";
 const singletonFactoryBytecode =
@@ -41,15 +33,19 @@ export async function etchSingletonFactory() {
   await anvilClient.setCode({ address: singletonFactory, bytecode: singletonFactoryBytecode });
 }
 
-// Deploys the Counter test fixture from the maintenance wallet and returns its address.
-// TODO: move into a dedicated file once there's more than one Counter-specific util.
-export async function deployCounter(): Promise<Address> {
-  const hash = await anvilClient.deployContract({ abi: counterAbi, bytecode: counterBytecode });
-  const receipt = await anvilClient.waitForTransactionReceipt({ hash });
-  assert(receipt.contractAddress, "Counter deployment failed");
-  return receipt.contractAddress;
+// Polls the mempool until it holds exactly `pending` pending and `queued` queued transactions.
+// Throws immediately if either count overshoots its target, since that means something
+// unexpected is happening rather than the target state simply not being reached yet.
+export async function waitForTxpoolCounts(pending: number, queued = 0) {
+  while (true) {
+    const status = await anvilClient.getTxpoolStatus();
+    if (status.pending === pending && status.queued === queued) return;
+    if (status.pending > pending || status.queued > queued) {
+      throw new Error(
+        `Expected ${pending} pending and ${queued} queued transactions, got ` +
+          `${status.pending} pending and ${status.queued} queued`,
+      );
+    }
+    await delay(10);
+  }
 }
-
-// TODO: move into a dedicated file once there's more than one Counter-specific util.
-export const addCalldata = (value: number) =>
-  encodeFunctionData({ abi: counterAbi, functionName: "add", args: [BigInt(value)] });

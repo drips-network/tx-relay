@@ -4,28 +4,22 @@ import { Address, Hex, isAddress, isHex } from "viem";
 import { eq, inArray, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
-import postgres from "postgres";
 import {
   burstsTable,
   callsTable,
   dbValueToSequenceEvent,
+  type SequenceEvent,
   sequenceEventsTable,
   sequenceEventToDbValue,
   sequencesTable,
 } from "./db/schema.ts";
 import { getConfig } from "./config.ts";
-import { runWorker } from "./worker.ts";
+import { runWorker, type WorkerHealth } from "./worker.ts";
 
-const config = getConfig();
-
-const db = drizzle({ connection: config.dbUrl, casing: "snake_case" });
-await migrate(db, { migrationsFolder: "./drizzle" });
-
-const runningSince = new Date();
-const workersHealth = config.chainConfigs.values()
-  .map((chainConfig) => runWorker(chainConfig, db))
-  .toArray()
-  .sort((workerA, workerB) => workerA.name.localeCompare(workerB.name));
+export type Health = {
+  runningSince: Date;
+  workers: WorkerHealth[];
+};
 
 const sendSequencesArgSchema = z.object({
   sequences: z.array(z.object({
@@ -41,18 +35,48 @@ const sendSequencesArgSchema = z.object({
     })).nonempty(),
   })).nonempty(),
 });
+export type SendSequencesArg = z.infer<typeof sendSequencesArgSchema>;
+
+export type CreatedSequence = {
+  id: string;
+};
+export type SendSequences = {
+  sequences: CreatedSequence[];
+};
 
 const sequencesStatesArgSchema = z.object({
   sequences: z.array(z.object({
     id: z.uuid(),
   })).nonempty().max(1_000),
 });
+export type SequenceStatesArg = z.infer<typeof sequencesStatesArgSchema>;
 
-const sequencesConfigArgSchema = z.object({
+export type SequenceStates = {
+  sequences: {
+    id: string;
+    pending: number;
+    successes: number;
+    failures: number;
+    events: (SequenceEvent & { timestamp: Date })[];
+  }[];
+};
+
+const sequencesConfigsArgSchema = z.object({
   sequences: z.array(z.object({
     id: z.uuid(),
   })).nonempty().max(1_000),
 });
+export type SequencesConfigsArg = z.infer<typeof sequencesConfigsArgSchema>;
+
+export type SequencesConfigs = {
+  sequences: {
+    chainId: number;
+    bursts: {
+      gasBufferPercent?: number;
+      calls: { target: Hex; calldata: Hex; gas: number | undefined }[];
+    }[];
+  }[];
+};
 
 async function parseJsonArg<S extends z.ZodTypeAny>(
   context: Context,
@@ -68,10 +92,21 @@ async function parseJsonArg<S extends z.ZodTypeAny>(
   }
 }
 
+const config = getConfig();
+
+const db = drizzle({ connection: config.dbUrl, casing: "snake_case" });
+await migrate(db, { migrationsFolder: "./drizzle" });
+
+const runningSince = new Date();
+const workersHealth = config.chainConfigs.values()
+  .map((chainConfig) => runWorker(chainConfig, db))
+  .toArray()
+  .sort((workerA, workerB) => workerA.name.localeCompare(workerB.name));
+
 const router = new Router();
 router
   .get("/health", (context) => {
-    context.response.body = { runningSince, workers: workersHealth };
+    context.response.body = { runningSince, workers: workersHealth } satisfies Health;
   })
   .post("/send-sequences", async (context) => {
     const arg = await parseJsonArg(context, sendSequencesArgSchema);
@@ -125,7 +160,7 @@ router
 
       context.response.body = {
         sequences: sequenceIds.map(({ sequenceId }) => ({ id: sequenceId })),
-      };
+      } satisfies SendSequences;
     });
   })
   .post("/sequences-states", async (context) => {
@@ -168,10 +203,10 @@ router
           }));
         return { id, pending, successes, failures, events };
       });
-      context.response.body = { sequences };
+      context.response.body = { sequences } satisfies SequenceStates;
     });
-  }).post("/sequences-config", async (context) => {
-    const arg = await parseJsonArg(context, sequencesConfigArgSchema);
+  }).post("/sequences-configs", async (context) => {
+    const arg = await parseJsonArg(context, sequencesConfigsArgSchema);
     const sequenceIds = arg.sequences.map(({ id }) => id);
 
     const callRows = await db.select({
@@ -197,10 +232,7 @@ router
 
     const sequences = sequenceIds.map((sequenceId) => {
       const calls = callsBySequenceId[sequenceId]!;
-      const bursts: {
-        gasBufferPercent?: number;
-        calls: { target: Hex; calldata: Hex; gas: number | undefined }[];
-      }[] = [];
+      const bursts: SequencesConfigs["sequences"][number]["bursts"] = [];
       let lastBurstId: number | undefined;
       for (const { burstId, gasBufferPercent, target, calldata, gas } of calls) {
         if (burstId !== lastBurstId) {
@@ -212,7 +244,7 @@ router
       }
       return { chainId: calls[0].chainId, bursts };
     });
-    context.response.body = { sequences };
+    context.response.body = { sequences } satisfies SequencesConfigs;
   });
 
 await new Application()

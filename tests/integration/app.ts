@@ -1,6 +1,6 @@
 import { retry } from "async";
-import { assert } from "@std/assert";
-import { Address, Hex } from "viem";
+import { assert, assertEquals } from "@std/assert";
+import { Hex } from "viem";
 import { foundry } from "viem/chains";
 
 // Anvil's default account #0, pre-funded with test ETH. This is the wallet the app's own
@@ -65,23 +65,6 @@ export async function stopApp(app: Deno.ChildProcess) {
   await app.status;
 }
 
-export async function sendSequence(
-  chainId: number,
-  target: Address,
-  calldata: Hex,
-): Promise<string> {
-  const response = await fetch(`http://localhost:${port}/send-sequences`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      sequences: [{ chainId, bursts: [{ calls: [{ target, calldata }] }] }],
-    }),
-  });
-  assert(response.ok, `/send-sequences returned ${response.status}`);
-  const { sequences: [{ id }] } = await response.json();
-  return id;
-}
-
 // deno-lint-ignore no-explicit-any
 export async function waitForSequenceState(id: string): Promise<any> {
   return await retry(async () => {
@@ -95,4 +78,10 @@ export async function waitForSequenceState(id: string): Promise<any> {
     assert(state.pending === 0, "sequence still has pending bursts");
     return state;
   }, { minTimeout: 50, maxTimeout: 50, multiplier: 1, maxAttempts: 300 });
+}
+
+export async function assertSequenceState(id: string, successes: number, failures: number) {
+  const state = await waitForSequenceState(id);
+  assertEquals(state.successes, successes);
+  assertEquals(state.failures, failures);
 }

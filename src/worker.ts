@@ -178,7 +178,7 @@ function log(...message: unknown[]) {
 type Task = () => Promise<Tasks>;
 type Tasks = Task[] | Task | undefined;
 
-type WorkerHealth = {
+export type WorkerHealth = {
   name: string;
   runningSince: Date | null;
 };

@@ -1,41 +1,13 @@
-import { delay } from "async";
-import { assertEquals } from "@std/assert";
-import { type Address } from "viem";
-import { foundry } from "viem/chains";
-import { abi as counterAbi } from "./counter.generated.ts";
-import { confirmations, sendSequence, startApp, stopApp, waitForSequenceState } from "./app.ts";
-import {
-  addCalldata,
-  anvilClient,
-  deployCounter,
-  etchSingletonFactory,
-  resetToGenesis,
-} from "./anvil.ts";
+import { assertSequenceState, confirmations, startApp, stopApp } from "./app.ts";
+import { anvilClient, etchSingletonFactory, resetToGenesis, waitForTxpoolCounts } from "./anvil.ts";
+import { assertCounterCount, deployCounter, sendCounterSequences } from "./counter.ts";
 import { resetDb } from "./db.ts";
 
-let counterAddress: Address;
 let checkpointId: `0x${string}`;
 let app: Deno.ChildProcess;
 
 async function mineConfirmations() {
   await anvilClient.mine({ blocks: confirmations });
-}
-
-// Polls the mempool until it holds exactly `pending` pending and `queued` queued transactions.
-// Throws immediately if either count overshoots its target, since that means something
-// unexpected is happening rather than the target state simply not being reached yet.
-async function waitForTxpoolCounts(pending: number, queued = 0) {
-  while (true) {
-    const status = await anvilClient.getTxpoolStatus();
-    if (status.pending === pending && status.queued === queued) return;
-    if (status.pending > pending || status.queued > queued) {
-      throw new Error(
-        `Expected ${pending} pending and ${queued} queued transactions, got ` +
-          `${status.pending} pending and ${status.queued} queued`,
-      );
-    }
-    await delay(10);
-  }
 }
 
 // Requires automine to be off. Waits for exactly one pending transaction and none queued, then
@@ -51,7 +23,7 @@ Deno.test.beforeAll(async () => {
   await resetToGenesis();
   await etchSingletonFactory();
 
-  counterAddress = await deployCounter();
+  await deployCounter();
 
   // Disabled for the whole suite so every transaction has to be mined explicitly (see
   // `mineNextTx`), rather than relying on Anvil's automine to include it as soon as it's sent.
@@ -100,22 +72,13 @@ Deno.test({
     // on-chain, so it must be awaited in isolation before any other sequence is sent - once
     // something else is accepted into the same batch, a later revert is just left pending for
     // a retry instead of being rejected.
-    const revertingId = await sendSequence(foundry.id, counterAddress, addCalldata(0));
-    const revertingState = await waitForSequenceState(revertingId);
-    assertEquals(revertingState.successes, 0);
-    assertEquals(revertingState.failures, 1);
+    const [revertingId] = await sendCounterSequences([0]);
+    await assertSequenceState(revertingId, 0, 1);
 
-    const successId = await sendSequence(foundry.id, counterAddress, addCalldata(5));
+    const [successId] = await sendCounterSequences([5]);
     await mineNextTx();
-    const successState = await waitForSequenceState(successId);
-    assertEquals(successState.successes, 1);
-    assertEquals(successState.failures, 0);
+    await assertSequenceState(successId, 1, 0);
 
-    const count = await anvilClient.readContract({
-      address: counterAddress,
-      abi: counterAbi,
-      functionName: "count",
-    });
-    assertEquals(count, 5n);
+    await assertCounterCount(5n);
   },
 });
