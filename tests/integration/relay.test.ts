@@ -1,4 +1,4 @@
-import { assertSequenceState, confirmations, startApp, stopApp } from "./app.ts";
+import { assertSequenceFinalState, confirmations, startApp, stopApp } from "./app.ts";
 import { anvilClient, etchSingletonFactory, resetToGenesis, waitForTxpoolCounts } from "./anvil.ts";
 import { assertCounterCount, deployCounter, sendCounterSequences } from "./counter.ts";
 import { resetDb } from "./db.ts";
@@ -73,11 +73,11 @@ Deno.test({
     // something else is accepted into the same batch, a later revert is just left pending for
     // a retry instead of being rejected.
     const [revertingId] = await sendCounterSequences([0]);
-    await assertSequenceState(revertingId, 0, 1);
+    await assertSequenceFinalState(revertingId, { successes: 0, failures: 1 });
 
     const [successId] = await sendCounterSequences([5]);
     await mineNextTx();
-    await assertSequenceState(successId, 1, 0);
+    await assertSequenceFinalState(successId, { successes: 1, failures: 0 });
 
     await assertCounterCount(5n);
   },

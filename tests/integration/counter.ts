@@ -4,6 +4,7 @@ import { foundry } from "viem/chains";
 import { abi as counterAbi, bytecode as counterBytecode } from "./counter.generated.ts";
 import { anvilClient } from "./anvil.ts";
 import { port } from "./app.ts";
+import { type SendSequencesArg, sendSequencesSchema } from "../../src/app.ts";
 
 export let counterAddress: Address | undefined;
 
@@ -30,26 +31,28 @@ export async function assertCounterCount(expected: bigint) {
 // Counter fixture's `add(value)`. Returns the created sequence ids, in the same order.
 export async function sendCounterSequences(...sequences: number[][]): Promise<string[]> {
   assert(counterAddress, "Counter not deployed yet");
+  const target = counterAddress;
+  const arg: SendSequencesArg = {
+    sequences: sequences.map((bursts) => ({
+      chainId: foundry.id,
+      bursts: bursts.map((value) => ({
+        calls: [{
+          target,
+          calldata: encodeFunctionData({
+            abi: counterAbi,
+            functionName: "add",
+            args: [BigInt(value)],
+          }),
+        }],
+      })),
+    })),
+  };
   const response = await fetch(`http://localhost:${port}/send-sequences`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      sequences: sequences.map((bursts) => ({
-        chainId: foundry.id,
-        bursts: bursts.map((value) => ({
-          calls: [{
-            target: counterAddress,
-            calldata: encodeFunctionData({
-              abi: counterAbi,
-              functionName: "add",
-              args: [BigInt(value)],
-            }),
-          }],
-        })),
-      })),
-    }),
+    body: JSON.stringify(arg),
   });
   assert(response.ok, `/send-sequences returned ${response.status}`);
-  const { sequences: created } = await response.json();
-  return created.map(({ id }: { id: string }) => id);
+  const { sequences: created } = sendSequencesSchema.parse(await response.json());
+  return created.map(({ id }) => id);
 }

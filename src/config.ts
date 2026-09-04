@@ -41,7 +41,7 @@ const testConfigSchema = z.object({
 export type Config = {
   dbUrl: string;
   port: number;
-  chainConfigs: Map<number, ChainConfig>;
+  chainConfigs: ChainConfig[];
 };
 
 export type ChainConfig = {
@@ -74,16 +74,21 @@ export function getConfig(): Config {
     // Resolve duplicate chain IDs by keeping the one from the lexically first key e.g. suffix-free.
     .reduce((map, [, chain]) => map.set(chain.id, chain), new Map<number, Chain>());
 
-  const chainConfigs = new Map<number, ChainConfig>();
+  const chainIds = new Set<number>();
+  const chainConfigs: ChainConfig[] = [];
   for (const wallet of config.wallets) {
     const account = privateKeyToAccount(wallet.privateKey);
     for (const { chainId, rpcUrls, ...config } of wallet.chains) {
+      if (chainIds.has(chainId)) throw new Error("Duplicate wallets for chain ID " + chainId);
+      chainIds.add(chainId);
+
       const chain = chains.get(chainId);
       if (!chain) throw new Error("Unknown wallet chain ID " + chainId);
-      if (chainConfigs.has(chainId)) throw new Error("Duplicate wallets for chain ID " + chainId);
       const transport = fallback(rpcUrls.length ? rpcUrls.map((url) => http(url)) : [http()]);
-      chainConfigs.set(chainId, {
-        client: createWalletClient({ account, chain, transport }).extend(publicActions),
+      const client = createWalletClient({ account, chain, transport }).extend(publicActions);
+
+      chainConfigs.push({
+        client,
         confirmations: config.confirmations ?? 1,
         minGasIncreasePercent: config.minGasIncreasePercent ?? 10,
         inclusionWaitBlocks: config.inclusionWaitBlocks ?? 5,

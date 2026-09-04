@@ -2,6 +2,12 @@ import { retry } from "async";
 import { assert, assertEquals } from "@std/assert";
 import { Hex } from "viem";
 import { foundry } from "viem/chains";
+import {
+  healthSchema,
+  type SequencesStates,
+  type SequencesStatesArg,
+  sequencesStatesSchema,
+} from "../../src/app.ts";
 
 // Anvil's default account #0, pre-funded with test ETH. This is the wallet the app's own
 // worker uses to send transactions - tests must never use it for their own on-chain setup
@@ -46,10 +52,9 @@ export async function startApp(): Promise<Deno.ChildProcess> {
     await retry(async () => {
       const response = await fetch(`http://localhost:${port}/health`);
       assert(response.ok, `/health returned ${response.status}`);
-      const { workers } = await response.json();
+      const { workers } = healthSchema.parse(await response.json());
       assert(
-        workers.length > 0 &&
-          workers.every((w: { runningSince: string | null }) => w.runningSince !== null),
+        workers.length > 0 && workers.every((w) => w.runningSince !== null),
         "worker(s) not running yet",
       );
     }, { minTimeout: 10, maxTimeout: 10, multiplier: 1, maxAttempts: 1500 });
@@ -65,23 +70,28 @@ export async function stopApp(app: Deno.ChildProcess) {
   await app.status;
 }
 
-// deno-lint-ignore no-explicit-any
-export async function waitForSequenceState(id: string): Promise<any> {
+export async function waitForSequenceFinalState(
+  id: string,
+): Promise<SequencesStates["sequences"][number]> {
   return await retry(async () => {
+    const arg: SequencesStatesArg = { sequences: [{ id }] };
     const response = await fetch(`http://localhost:${port}/sequences-states`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sequences: [{ id }] }),
+      body: JSON.stringify(arg),
     });
     assert(response.ok, `/sequences-states returned ${response.status}`);
-    const { sequences: [state] } = await response.json();
+    const { sequences: [state] } = sequencesStatesSchema.parse(await response.json());
     assert(state.pending === 0, "sequence still has pending bursts");
     return state;
   }, { minTimeout: 50, maxTimeout: 50, multiplier: 1, maxAttempts: 300 });
 }
 
-export async function assertSequenceState(id: string, successes: number, failures: number) {
-  const state = await waitForSequenceState(id);
-  assertEquals(state.successes, successes);
-  assertEquals(state.failures, failures);
+export async function assertSequenceFinalState(
+  id: string,
+  expectedState: { successes: number; failures: number },
+) {
+  const actualState = await waitForSequenceFinalState(id);
+  assertEquals(actualState.successes, expectedState.successes);
+  assertEquals(actualState.failures, expectedState.failures);
 }
