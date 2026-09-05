@@ -1,5 +1,5 @@
 import { delay } from "async";
-import { createTestClient, http, publicActions, walletActions } from "viem";
+import { createTestClient, http, numberToHex, publicActions, walletActions } from "viem";
 import { foundry } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
 
@@ -31,6 +31,15 @@ export async function resetToGenesis() {
 
 export async function etchSingletonFactory() {
   await anvilClient.setCode({ address: singletonFactory, bytecode: singletonFactoryBytecode });
+}
+
+// Chain state, like any other set via a transaction, so - unlike automine - it's restored by
+// `evm_revert`/`anvil_snapshot` but wiped by `resetToGenesis`, which needs to reapply it.
+export async function setBlockGasLimit(gas: bigint) {
+  await anvilClient.request({
+    method: "evm_setBlockGasLimit",
+    params: [numberToHex(gas)],
+  });
 }
 
 // Polls the mempool until it holds exactly `pending` pending and `queued` queued transactions.

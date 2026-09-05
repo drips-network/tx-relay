@@ -4,6 +4,8 @@ import { Hex } from "viem";
 import { foundry } from "viem/chains";
 import {
   healthSchema,
+  type SendSequencesArg,
+  sendSequencesSchema,
   type SequencesStates,
   type SequencesStatesArg,
   sequencesStatesSchema,
@@ -68,6 +70,17 @@ export async function startApp(): Promise<Deno.ChildProcess> {
 export async function stopApp(app: Deno.ChildProcess) {
   app.kill("SIGTERM");
   await app.status;
+}
+
+export async function sendSequences(arg: SendSequencesArg): Promise<string[]> {
+  const response = await fetch(`http://localhost:${port}/send-sequences`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(arg),
+  });
+  assert(response.ok, `/send-sequences returned ${response.status}`);
+  const { sequences } = sendSequencesSchema.parse(await response.json());
+  return sequences.map(({ id }) => id);
 }
 
 export async function waitForSequenceFinalState(

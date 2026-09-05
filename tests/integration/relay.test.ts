@@ -1,7 +1,22 @@
-import { assertSequenceFinalState, confirmations, startApp, stopApp } from "./app.ts";
-import { anvilClient, etchSingletonFactory, resetToGenesis, waitForTxpoolCounts } from "./anvil.ts";
-import { assertCounterCount, deployCounter, sendCounterSequences } from "./counter.ts";
+import {
+  assertSequenceFinalState,
+  confirmations,
+  sendSequences,
+  startApp,
+  stopApp,
+} from "./app.ts";
+import {
+  anvilClient,
+  etchSingletonFactory,
+  resetToGenesis,
+  setBlockGasLimit,
+  waitForTxpoolCounts,
+} from "./anvil.ts";
+import { addLog, assertLogs, deployCallsLog, setReverts } from "./calls-log.ts";
 import { resetDb } from "./db.ts";
+import { type SendSequencesArg } from "../../src/app.ts";
+
+const chainId = anvilClient.chain.id;
 
 let checkpointId: `0x${string}`;
 let app: Deno.ChildProcess;
@@ -21,9 +36,10 @@ async function mineNextTx() {
 
 Deno.test.beforeAll(async () => {
   await resetToGenesis();
+  await setBlockGasLimit(1_000_000n);
   await etchSingletonFactory();
 
-  await deployCounter();
+  await deployCallsLog();
 
   // Disabled for the whole suite so every transaction has to be mined explicitly (see
   // `mineNextTx`), rather than relying on Anvil's automine to include it as soon as it's sent.
@@ -39,7 +55,7 @@ Deno.test.beforeEach(async () => {
   // in-flight), which no individual test can be trusted to leave clean, so it's restarted
   // fresh here rather than relying on each test to manage its own lifecycle correctly.
   app = await startApp();
-  // Every test starts from the checkpoint taken right after the Counter was deployed, so the
+  // Every test starts from the checkpoint taken right after CallsLog was deployed, so the
   // Executor is never deployed yet and this app instance always has to (re)deploy it here,
   // which needs confirming before the relay can make any further progress.
   await mineNextTx();
@@ -68,11 +84,14 @@ Deno.test({
   name: "send-sequences: executes a successful call",
   timeout: 30_000,
   async fn() {
-    const [successId] = await sendCounterSequences([5]);
+    const arg: SendSequencesArg = {
+      sequences: [{ chainId, bursts: [{ calls: [addLog("ok")] }] }],
+    };
+    const [successId] = await sendSequences(arg);
     await mineNextTx();
 
     await assertSequenceFinalState(successId, { successes: 1, failures: 0 });
-    await assertCounterCount(5n);
+    await assertLogs(["ok"]);
   },
 });
 
@@ -80,9 +99,14 @@ Deno.test({
   name: "send-sequences: rejects a reverting call",
   timeout: 30_000,
   async fn() {
-    const [revertingId] = await sendCounterSequences([0]);
+    // `setReverts` and `addLog` are in the same burst, so they execute together in a single
+    // atomic transaction - there's no window where `addLog` could run against stale state.
+    const arg: SendSequencesArg = {
+      sequences: [{ chainId, bursts: [{ calls: [setReverts("bad"), addLog("bad")] }] }],
+    };
+    const [revertingId] = await sendSequences(arg);
 
     await assertSequenceFinalState(revertingId, { successes: 0, failures: 1 });
-    await assertCounterCount(0n);
+    await assertLogs([]);
   },
 });

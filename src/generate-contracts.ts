@@ -33,4 +33,4 @@ function generateArtifact(contractName: string, outputPath: string) {
 }
 
 generateArtifact("Executor", "src/executor.generated.ts");
-generateArtifact("Counter", "tests/integration/counter.generated.ts");
+generateArtifact("CallsLog", "tests/integration/calls-log.generated.ts");
