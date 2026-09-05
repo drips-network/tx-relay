@@ -92,7 +92,7 @@ export function getConfig(): Config {
         confirmations: config.confirmations ?? 1,
         minGasIncreasePercent: config.minGasIncreasePercent ?? 10,
         inclusionWaitBlocks: config.inclusionWaitBlocks ?? 5,
-        workerRestartDelayMs: testConfig.workerRestartDelayMs ?? 60_000,
+        workerRestartDelayMs: testConfig.workerRestartDelayMs ?? 30_000,
         sendNextBatchMinRetryDelayMs: testConfig.sendNextBatchMinRetryDelayMs ?? 1_000,
         delayUntilBlockNumberPollingIntervalMs: testConfig.delayUntilBlockNumberPollingIntervalMs ??
           2_000,

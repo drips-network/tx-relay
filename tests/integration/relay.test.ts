@@ -65,20 +65,24 @@ Deno.test({
 });
 
 Deno.test({
-  name: "send-sequences: executes a successful call and rejects a reverting one",
+  name: "send-sequences: executes a successful call",
   timeout: 30_000,
   async fn() {
-    // A sequence whose only burst reverts is rejected outright, without ever being submitted
-    // on-chain, so it must be awaited in isolation before any other sequence is sent - once
-    // something else is accepted into the same batch, a later revert is just left pending for
-    // a retry instead of being rejected.
-    const [revertingId] = await sendCounterSequences([0]);
-    await assertSequenceFinalState(revertingId, { successes: 0, failures: 1 });
-
     const [successId] = await sendCounterSequences([5]);
     await mineNextTx();
-    await assertSequenceFinalState(successId, { successes: 1, failures: 0 });
 
+    await assertSequenceFinalState(successId, { successes: 1, failures: 0 });
     await assertCounterCount(5n);
+  },
+});
+
+Deno.test({
+  name: "send-sequences: rejects a reverting call",
+  timeout: 30_000,
+  async fn() {
+    const [revertingId] = await sendCounterSequences([0]);
+
+    await assertSequenceFinalState(revertingId, { successes: 0, failures: 1 });
+    await assertCounterCount(0n);
   },
 });
