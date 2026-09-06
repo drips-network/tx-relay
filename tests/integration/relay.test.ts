@@ -1,5 +1,5 @@
 import {
-  assertSequenceFinalState,
+  assertSequenceState,
   confirmations,
   sendSequences,
   startApp,
@@ -90,7 +90,7 @@ Deno.test({
     const [successId] = await sendSequences(arg);
     await mineNextTx();
 
-    await assertSequenceFinalState(successId, { successes: 1, failures: 0 });
+    await assertSequenceState(successId, { successes: 1, failures: 0 });
     await assertLogs(["ok"]);
   },
 });
@@ -106,7 +106,77 @@ Deno.test({
     };
     const [revertingId] = await sendSequences(arg);
 
-    await assertSequenceFinalState(revertingId, { successes: 0, failures: 1 });
+    await assertSequenceState(revertingId, { successes: 0, failures: 1 });
+    await assertLogs([]);
+  },
+});
+
+Deno.test({
+  name: "send-sequences: a failing burst skips the rest until it's reached, then fails them too",
+  timeout: 30_000,
+  async fn() {
+    // The 2nd burst fails alongside the 1st being accepted into the same batch, so it's left
+    // pending (skipped) rather than rejected outright - the 3rd is never even considered, since
+    // a sequence's bursts only run in order.
+    const arg: SendSequencesArg = {
+      sequences: [{
+        chainId,
+        bursts: [
+          { calls: [addLog("a")] },
+          { calls: [setReverts("bad"), addLog("bad")] },
+          { calls: [addLog("c")] },
+        ],
+      }],
+    };
+    const [sequenceId] = await sendSequences(arg);
+    await mineNextTx();
+
+    // Once the 1st burst is mined, the 2nd is retried as the sole item in a fresh batch, so this
+    // time it's rejected outright - which fails the rest of the sequence (the 3rd) without ever
+    // attempting it.
+    await assertSequenceState(sequenceId, { successes: 1, failures: 2 });
+    await assertLogs(["a"]);
+  },
+});
+
+Deno.test({
+  name: "send-sequences: a failing 1st burst fails only its own sequence, immediately and fully",
+  timeout: 30_000,
+  async fn() {
+    // Unlike a later burst in an already-running sequence, a 1st burst always rejects outright
+    // on failure, regardless of what else is in the same batch - so the 2nd sequence here fails
+    // immediately, without affecting the 1st.
+    const arg: SendSequencesArg = {
+      sequences: [
+        { chainId, bursts: [{ calls: [addLog("ok")] }] },
+        { chainId, bursts: [{ calls: [setReverts("bad"), addLog("bad")] }] },
+      ],
+    };
+    const [successId, revertingId] = await sendSequences(arg);
+    await assertSequenceState(revertingId, { successes: 0, failures: 1 });
+    await mineNextTx();
+
+    await assertSequenceState(successId, { successes: 1, failures: 0 });
+    await assertLogs(["ok"]);
+  },
+});
+
+Deno.test({
+  name: "send-sequences: a 2nd sequence triggering a revert set up by the 1st is skipped, " +
+    "then fails once the 1st is mined",
+  timeout: 30_000,
+  async fn() {
+    const arg: SendSequencesArg = {
+      sequences: [
+        { chainId, bursts: [{ calls: [setReverts("bad")] }] },
+        { chainId, bursts: [{ calls: [addLog("bad")] }] },
+      ],
+    };
+    const [setupId, triggerId] = await sendSequences(arg);
+    await mineNextTx();
+
+    await assertSequenceState(setupId, { successes: 1, failures: 0 });
+    await assertSequenceState(triggerId, { successes: 0, failures: 1 });
     await assertLogs([]);
   },
 });

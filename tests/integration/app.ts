@@ -1,12 +1,11 @@
-import { retry } from "async";
-import { assert, assertEquals } from "@std/assert";
+import { delay, retry } from "async";
+import { assert } from "@std/assert";
 import { Hex } from "viem";
 import { foundry } from "viem/chains";
 import {
   healthSchema,
   type SendSequencesArg,
   sendSequencesSchema,
-  type SequencesStates,
   type SequencesStatesArg,
   sequencesStatesSchema,
 } from "../../src/app.ts";
@@ -83,10 +82,16 @@ export async function sendSequences(arg: SendSequencesArg): Promise<string[]> {
   return sequences.map(({ id }) => id);
 }
 
-export async function waitForSequenceFinalState(
+// Polls a sequence's state until it holds exactly the expected successes, failures and pending
+// counts. Throws immediately if successes or failures overshoot, or pending undershoots, since
+// that means the sequence resolved differently than expected rather than just not being there
+// yet.
+export async function assertSequenceState(
   id: string,
-): Promise<SequencesStates["sequences"][number]> {
-  return await retry(async () => {
+  expectedState: { successes: number; failures: number; pending?: number },
+) {
+  const { successes, failures, pending = 0 } = expectedState;
+  while (true) {
     const arg: SequencesStatesArg = { sequences: [{ id }] };
     const response = await fetch(`http://localhost:${port}/sequences-states`, {
       method: "POST",
@@ -95,16 +100,15 @@ export async function waitForSequenceFinalState(
     });
     assert(response.ok, `/sequences-states returned ${response.status}`);
     const { sequences: [state] } = sequencesStatesSchema.parse(await response.json());
-    assert(state.pending === 0, "sequence still has pending bursts");
-    return state;
-  }, { minTimeout: 50, maxTimeout: 50, multiplier: 1, maxAttempts: 300 });
-}
-
-export async function assertSequenceFinalState(
-  id: string,
-  expectedState: { successes: number; failures: number },
-) {
-  const actualState = await waitForSequenceFinalState(id);
-  assertEquals(actualState.successes, expectedState.successes);
-  assertEquals(actualState.failures, expectedState.failures);
+    if (state.successes === successes && state.failures === failures && state.pending === pending) {
+      return;
+    }
+    if (state.successes > successes || state.failures > failures || state.pending < pending) {
+      throw new Error(
+        `Expected ${successes} successes, ${failures} failures and ${pending} pending, got ` +
+          `${state.successes} successes, ${state.failures} failures and ${state.pending} pending`,
+      );
+    }
+    await delay(50);
+  }
 }

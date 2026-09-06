@@ -396,7 +396,7 @@ async function buildNextBatch(dbSequences: DbSequence[]): Promise<
     log("Attempting adding sequence", dbSequence.id, "to the batch");
     let sequenceBurstsGas = 0n;
     for (const [burstIdx, dbBurst] of dbSequence.bursts.entries()) {
-      let onRevert: "reject" | "outOfGas" | "skip" = burstIdx == 0 ? "reject" : "skip";
+      let onRevert: "reject" | "outOfGas" | "skip" = "skip";
       try {
         const nextAbiCalls: AbiCall[] = dbBurst.calls.map(
           ({ target, calldata, gas }) => ({ target, data: calldata, gas: BigInt(gas ?? 0) }),
@@ -407,6 +407,7 @@ async function buildNextBatch(dbSequences: DbSequence[]): Promise<
 
         // If the next burst runs out of available gas when executed in the sequence,
         // it's treated as a revert, and isn't counted as out of gas.
+        onRevert = burstIdx == 0 ? "reject" : "skip";
         const execNextGas = await client.estimateGas({
           account: client.account,
           data: encodeFunctionData({
