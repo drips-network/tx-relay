@@ -1,10 +1,4 @@
-import {
-  assertSequenceState,
-  confirmations,
-  sendSequences,
-  startApp,
-  stopApp,
-} from "./app.ts";
+import { assertSequenceState, confirmations, sendSequences, startApp, stopApp } from "./app.ts";
 import {
   anvilClient,
   etchSingletonFactory,
@@ -12,7 +6,7 @@ import {
   setBlockGasLimit,
   waitForTxpoolCounts,
 } from "./anvil.ts";
-import { addLog, assertLogs, deployCallsLog, setReverts } from "./calls-log.ts";
+import { addLog, assertLogs, deployCallsLog, setGasPenalty, setReverts } from "./calls-log.ts";
 import { resetDb } from "./db.ts";
 import { type SendSequencesArg } from "../../src/app.ts";
 
@@ -129,6 +123,10 @@ Deno.test({
       }],
     };
     const [sequenceId] = await sendSequences(arg);
+    // Only the 1st burst's transaction is pending - the 2nd (and, behind it, the 3rd) was
+    // skipped, not rejected outright, so all 3 bursts are still pending at this point.
+    await waitForTxpoolCounts(1);
+    await assertSequenceState(sequenceId, { successes: 0, failures: 0, pending: 3 });
     await mineNextTx();
 
     // Once the 1st burst is mined, the 2nd is retried as the sole item in a fresh batch, so this
@@ -173,10 +171,143 @@ Deno.test({
       ],
     };
     const [setupId, triggerId] = await sendSequences(arg);
+    // Only the setup sequence's transaction is pending - the trigger sequence was skipped, not
+    // rejected outright, so it's still pending too at this point.
+    await waitForTxpoolCounts(1);
+    await assertSequenceState(setupId, { successes: 0, failures: 0, pending: 1 });
+    await assertSequenceState(triggerId, { successes: 0, failures: 0, pending: 1 });
     await mineNextTx();
 
     await assertSequenceState(setupId, { successes: 1, failures: 0 });
     await assertSequenceState(triggerId, { successes: 0, failures: 1 });
     await assertLogs([]);
+  },
+});
+
+Deno.test({
+  name: "send-sequences: a burst burns 1.1M gas",
+  timeout: 30_000,
+  async fn() {
+    // The block gas limit is 1M (see `setBlockGasLimit` in `beforeAll`), so this can never fit
+    // in any block - it should be rejected outright, without ever being submitted on-chain.
+    const arg: SendSequencesArg = {
+      sequences: [{
+        chainId,
+        bursts: [{ calls: [setGasPenalty("heavy", 1_100_000n), addLog("heavy")] }],
+      }],
+    };
+    const [sequenceId] = await sendSequences(arg);
+
+    await assertSequenceState(sequenceId, { successes: 0, failures: 1 });
+    await assertLogs([]);
+  },
+});
+
+Deno.test({
+  name: "send-sequences: burst 1 burns 600K gas, burst 2 500K gas",
+  timeout: 30_000,
+  async fn() {
+    // Each burst fits in a block alone, but not together, so the 2nd doesn't fit in the same
+    // batch as the 1st - it's left pending (not failed) and only succeeds once retried once the
+    // 1st is mined and out of the way.
+    const arg: SendSequencesArg = {
+      sequences: [{
+        chainId,
+        bursts: [
+          { calls: [setGasPenalty("a", 600_000n), addLog("a")] },
+          { calls: [setGasPenalty("b", 500_000n), addLog("b")] },
+        ],
+      }],
+    };
+    const [sequenceId] = await sendSequences(arg);
+    await mineNextTx();
+    await assertSequenceState(sequenceId, { successes: 1, failures: 0, pending: 1 });
+    await mineNextTx();
+
+    await assertSequenceState(sequenceId, { successes: 2, failures: 0 });
+    await assertLogs(["a", "b"]);
+  },
+});
+
+Deno.test({
+  name: "send-sequences: burst 1 burns 0 gas, burst 2 1.1M gas",
+  timeout: 30_000,
+  async fn() {
+    // Burst 1 doesn't fit alongside burst 2 either, so it's initially left pending too, just
+    // like the 600K/500K case. But once burst 1 is mined, burst 2 becomes the earliest pending
+    // burst of its own sequence, and - since it alone already exceeds the 1M block gas limit -
+    // it's rejected outright rather than merely skipped again.
+    const arg: SendSequencesArg = {
+      sequences: [{
+        chainId,
+        bursts: [
+          { calls: [addLog("a")] },
+          { calls: [setGasPenalty("heavy", 1_100_000n), addLog("heavy")] },
+        ],
+      }],
+    };
+    const [sequenceId] = await sendSequences(arg);
+    // Only burst 1's transaction is pending - burst 2 was skipped, not rejected outright, so the
+    // sequence still has both bursts pending at this point.
+    await waitForTxpoolCounts(1);
+    await assertSequenceState(sequenceId, { successes: 0, failures: 0, pending: 2 });
+    await mineNextTx();
+
+    await assertSequenceState(sequenceId, { successes: 1, failures: 1 });
+    await assertLogs(["a"]);
+  },
+});
+
+Deno.test({
+  name: "send-sequences: sequence 1 burns 600K gas, sequence 2 500K gas",
+  timeout: 30_000,
+  async fn() {
+    // Same as bursts within one sequence not fitting together, but across two independent
+    // sequences instead - the 2nd is left pending until the 1st is mined and out of the way.
+    const arg: SendSequencesArg = {
+      sequences: [
+        { chainId, bursts: [{ calls: [setGasPenalty("a", 600_000n), addLog("a")] }] },
+        { chainId, bursts: [{ calls: [setGasPenalty("b", 500_000n), addLog("b")] }] },
+      ],
+    };
+    const [seq1Id, seq2Id] = await sendSequences(arg);
+    await mineNextTx();
+    await assertSequenceState(seq1Id, { successes: 1, failures: 0 });
+    await assertSequenceState(seq2Id, { successes: 0, failures: 0, pending: 1 });
+    await mineNextTx();
+    await assertSequenceState(seq1Id, { successes: 1, failures: 0 });
+    await assertSequenceState(seq2Id, { successes: 1, failures: 0 });
+    await assertLogs(["a", "b"]);
+  },
+});
+
+Deno.test({
+  name: "send-sequences: sequence 1 burns 600K gas, sequence 2 0 gas then 500K gas",
+  timeout: 30_000,
+  async fn() {
+    // Sequence 2's 1st burst (0 gas) is cheap enough to fit alongside sequence 1's in the same
+    // batch and mines together with it, but its 2nd burst (500K) doesn't fit alongside sequence
+    // 1's - it's left pending until sequence 1's burst is mined and out of the way.
+    const arg: SendSequencesArg = {
+      sequences: [
+        { chainId, bursts: [{ calls: [setGasPenalty("a", 600_000n), addLog("a")] }] },
+        {
+          chainId,
+          bursts: [
+            { calls: [addLog("b")] },
+            { calls: [setGasPenalty("c", 500_000n), addLog("c")] },
+          ],
+        },
+      ],
+    };
+    const [seq1Id, seq2Id] = await sendSequences(arg);
+    await mineNextTx();
+    await assertSequenceState(seq1Id, { successes: 1, failures: 0 });
+    await assertSequenceState(seq2Id, { successes: 1, failures: 0, pending: 1 });
+    await mineNextTx();
+
+    await assertSequenceState(seq1Id, { successes: 1, failures: 0 });
+    await assertSequenceState(seq2Id, { successes: 2, failures: 0 });
+    await assertLogs(["a", "b", "c"]);
   },
 });
