@@ -64,6 +64,7 @@ const filecoinSimulateContractGas = 10_000_000_000n;
 
 type PendingTxs = {
   txSenderId: number;
+  senderAddr: Address;
   nonce: number;
   txHashes: Hex[];
   nextPayload?: {
@@ -258,6 +259,7 @@ async function cleanUpPendingTxs(): Promise<Tasks> {
 
   setPendingTxs({
     txSenderId,
+    senderAddr,
     nonce,
     txHashes: txs.map(({ txHash }) => txHash),
   });
@@ -387,7 +389,7 @@ async function buildNextBatch(dbSequences: DbSequence[]): Promise<
   const rejectedSequences: RejectedSequence[] = [];
 
   const client = getClient();
-  const blockNumber = await client.getBlockNumber({ cacheTime: 0 });
+  const blockNumber = await client.getBlockNumber();
   let lastBurstInclusionGas = await getExecBaseInclusionGas();
 
   let outOfGasBursts = 0;
@@ -556,6 +558,7 @@ async function registerPendingTx(
     .values({ txSenderId, target, calldata, gas }).returning({ txPayloadId: txPayloadsTable.id });
   setPendingTxs({
     txSenderId,
+    senderAddr: address,
     nonce,
     txHashes: [],
     nextPayload: { txPayloadId, target, calldata, gas },
@@ -712,7 +715,7 @@ async function watchTxs(
       continue retry;
     }
 
-    if (await getNonce() > pendingTxs.nonce) {
+    if (client.account.address === pendingTxs.senderAddr && await getNonce() > pendingTxs.nonce) {
       if (nonceSkipConfirmed) return finalizeTx;
       await delayUntilBlockNumber(await client.getBlockNumber() + confirmations);
       nonceSkipConfirmed = true;

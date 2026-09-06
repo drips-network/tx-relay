@@ -1,7 +1,22 @@
-import { assertSequenceState, confirmations, sendSequences, startApp, stopApp } from "./app.ts";
+import { assert, assertEquals } from "@std/assert";
+import { delay } from "async";
+import { createWalletClient, http, publicActions, serializeTransaction } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
+import {
+  assertSequenceState,
+  confirmations,
+  inclusionWaitBlocks,
+  otherWorkerPrivateKey,
+  sendSequences,
+  startApp,
+  stopApp,
+  workerPrivateKey,
+} from "./app.ts";
 import {
   anvilClient,
+  dropPendingTxs,
   etchSingletonFactory,
+  getTxpoolTxs,
   resetToGenesis,
   setBlockGasLimit,
   waitForTxpoolCounts,
@@ -309,5 +324,226 @@ Deno.test({
     await assertSequenceState(seq1Id, { successes: 1, failures: 0 });
     await assertSequenceState(seq2Id, { successes: 2, failures: 0 });
     await assertLogs(["a", "b", "c"]);
+  },
+});
+
+Deno.test({
+  name: "send-sequences: a call's gas limit is enforced",
+  timeout: 30_000,
+  async fn() {
+    // Both calls burn close to a 200K gas limit, but only the 2nd exceeds it - proving the
+    // limit is actually enforced on-chain, not just advisory.
+    const arg: SendSequencesArg = {
+      sequences: [
+        {
+          chainId,
+          bursts: [{ calls: [setGasPenalty("under", 100_000n), addLog("under", 200_000)] }],
+        },
+        {
+          chainId,
+          bursts: [{ calls: [setGasPenalty("over", 201_000n), addLog("over", 200_000)] }],
+        },
+      ],
+    };
+    const [underId, overId] = await sendSequences(arg);
+    await assertSequenceState(overId, { successes: 0, failures: 1 });
+    await mineNextTx();
+
+    await assertSequenceState(underId, { successes: 1, failures: 0 });
+    await assertLogs(["under"]);
+  },
+});
+
+Deno.test({
+  name: "send-sequences: gasBufferPercent inflates the transaction's gas limit",
+  timeout: 30_000,
+  async fn() {
+    // 50% on top of the ~500K actually needed should give a transaction gas limit of at least
+    // 750K, not just however much the burst actually used.
+    const arg: SendSequencesArg = {
+      sequences: [{
+        chainId,
+        bursts: [{
+          gasBufferPercent: 50,
+          calls: [setGasPenalty("buffered", 500_000n), addLog("buffered")],
+        }],
+      }],
+    };
+    const [sequenceId] = await sendSequences(arg);
+    await mineNextTx();
+
+    await assertSequenceState(sequenceId, { successes: 1, failures: 0 });
+    await assertLogs(["buffered"]);
+
+    // `mineNextTx` mines the transaction, then `confirmations` further blocks on top of it, so
+    // the transaction's block is `confirmations` behind the current one.
+    const blockNumber = await anvilClient.getBlockNumber();
+    const block = await anvilClient.getBlock({
+      blockNumber: blockNumber - BigInt(confirmations),
+      includeTransactions: true,
+    });
+    assertEquals(block.transactions.length, 1);
+    assert(
+      block.transactions[0].gas >= 750_000n,
+      `Expected a gas limit of at least 750000, got ${block.transactions[0].gas}`,
+    );
+  },
+});
+
+Deno.test({
+  name: "send-sequences: a sequence's transaction is picked up again after the app restarts",
+  timeout: 30_000,
+  async fn() {
+    const arg: SendSequencesArg = {
+      sequences: [{ chainId, bursts: [{ calls: [addLog("ok")] }] }],
+    };
+    const [sequenceId] = await sendSequences(arg);
+    await waitForTxpoolCounts(1);
+
+    await stopApp(app);
+    app = await startApp();
+
+    await mineNextTx();
+    await assertSequenceState(sequenceId, { successes: 1, failures: 0 });
+    await assertLogs(["ok"]);
+  },
+});
+
+Deno.test({
+  name: "send-sequences: after a restart with a different wallet, " +
+    "a stale TX is skipped and resent from the new wallet",
+  timeout: 30_000,
+  async fn() {
+    const arg: SendSequencesArg = {
+      sequences: [{ chainId, bursts: [{ calls: [addLog("ok")] }] }],
+    };
+    const [sequenceId] = await sendSequences(arg);
+    await waitForTxpoolCounts(1);
+
+    await stopApp(app);
+
+    // Dropped instead of just left unmined, since mining always packs in whatever's pending
+    // regardless of automine - it would otherwise get mined as soon as the next blocks are.
+    await dropPendingTxs();
+
+    app = await startApp(otherWorkerPrivateKey);
+    // `startApp` only waits for `/health` to report the worker as running, not for it to have
+    // reached the point of recording the block number it'll wait `inclusionWaitBlocks` from -
+    // mining immediately risks the worker capturing a later block than intended, undercounting
+    // how many blocks are actually left to mine below.
+    await delay(100);
+
+    // The old wallet's TX is never mined, so once the new wallet has waited `inclusionWaitBlocks`
+    // for it to land, it gives up - the sequence's burst is left pending, to be sent again.
+    await anvilClient.mine({ blocks: inclusionWaitBlocks });
+    await assertSequenceState(sequenceId, { successes: 0, failures: 0, pending: 1 });
+
+    await mineNextTx();
+    await assertSequenceState(sequenceId, { successes: 1, failures: 0 });
+    await assertLogs(["ok"]);
+
+    // `mineNextTx` mines the transaction, then `confirmations` further blocks on top of it, so
+    // the transaction's block is `confirmations` behind the current one.
+    const blockNumber = await anvilClient.getBlockNumber();
+    const block = await anvilClient.getBlock({
+      blockNumber: blockNumber - BigInt(confirmations),
+      includeTransactions: true,
+    });
+    assertEquals(block.transactions.length, 1);
+    assertEquals(
+      block.transactions[0].from.toLowerCase(),
+      privateKeyToAccount(otherWorkerPrivateKey).address.toLowerCase(),
+    );
+  },
+});
+
+Deno.test({
+  name: "send-sequences: a dropped TX is repriced, then the original is restored and mined",
+  timeout: 30_000,
+  async fn() {
+    const arg: SendSequencesArg = {
+      sequences: [{ chainId, bursts: [{ calls: [addLog("ok")] }] }],
+    };
+    const [sequenceId] = await sendSequences(arg);
+    await waitForTxpoolCounts(1);
+
+    // Captured in full (including its signature) before being dropped, so it can be resubmitted
+    // verbatim later - proving the worker still recognizes success via an earlier attempt, not
+    // just its latest one.
+    const [{ hash: firstTxHash }] = await getTxpoolTxs();
+    const firstTx = await anvilClient.getTransaction({ hash: firstTxHash });
+    assert(
+      firstTx.type === "eip1559" && firstTx.yParity !== undefined,
+      "Expected an EIP-1559 transaction",
+    );
+    await dropPendingTxs();
+
+    // The worker gives up waiting on the dropped TX after `inclusionWaitBlocks` and sends a
+    // repriced retry at the same nonce.
+    await anvilClient.mine({ blocks: inclusionWaitBlocks });
+    await waitForTxpoolCounts(1);
+    await dropPendingTxs();
+
+    // The original TX is restored - despite the repriced retry being the worker's latest
+    // attempt, this earlier one lands and mines instead.
+    // `serializeTransaction` expects `data`, but viem's parsed `Transaction` names the same
+    // field `input` - passing `firstTx` directly would silently serialize it as empty calldata.
+    await anvilClient.sendRawTransaction({
+      serializedTransaction: serializeTransaction({
+        type: "eip1559",
+        chainId,
+        nonce: firstTx.nonce,
+        to: firstTx.to,
+        value: firstTx.value,
+        data: firstTx.input,
+        gas: firstTx.gas,
+        maxFeePerGas: firstTx.maxFeePerGas,
+        maxPriorityFeePerGas: firstTx.maxPriorityFeePerGas,
+        accessList: firstTx.accessList,
+      }, { r: firstTx.r, s: firstTx.s, yParity: firstTx.yParity }),
+    });
+    await mineNextTx();
+
+    await assertSequenceState(sequenceId, { successes: 1, failures: 0 });
+    await assertLogs(["ok"]);
+  },
+});
+
+Deno.test({
+  name: "send-sequences: a dummy TX using up the nonce makes the app skip and resend",
+  timeout: 30_000,
+  async fn() {
+    const arg: SendSequencesArg = {
+      sequences: [{ chainId, bursts: [{ calls: [addLog("ok")] }] }],
+    };
+    const [sequenceId] = await sendSequences(arg);
+    await waitForTxpoolCounts(1);
+
+    const [{ hash: firstTxHash }] = await getTxpoolTxs();
+    const { nonce } = await anvilClient.getTransaction({ hash: firstTxHash });
+    await dropPendingTxs();
+
+    // Consumes the worker's nonce with an unrelated transaction, simulating something outside
+    // the relay's control (not a repriced retry of its own) having used it up.
+    const workerAccount = privateKeyToAccount(workerPrivateKey);
+    const dummyClient = createWalletClient({
+      account: workerAccount,
+      chain: anvilClient.chain,
+      transport: http(),
+    }).extend(publicActions);
+    await dummyClient.sendTransaction({ to: workerAccount.address, value: 0n, nonce });
+    await mineNextTx();
+
+    // Noticing the nonce skip, then sending, mining and confirming the resend all need further
+    // confirmations that can't be pinned to an exact block - each is mined with a short pause so
+    // the worker (a separate process) gets a chance to react before the next one lands, and the
+    // sequence's final state is polled for below rather than any one intermediate step.
+    for (let i = 0; i < 4; i++) {
+      await delay(20);
+      await anvilClient.mine({ blocks: 1 });
+    }
+
+    await assertSequenceState(sequenceId, { successes: 1, failures: 0 });
+    await assertLogs(["ok"]);
   },
 });

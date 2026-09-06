@@ -17,12 +17,21 @@ import {
 export const workerPrivateKey: Hex =
   "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 
+// Anvil's default account #2, pre-funded with test ETH. Used in place of `workerPrivateKey` by
+// tests simulating the app restarting with a different wallet for the same chain.
+export const otherWorkerPrivateKey: Hex =
+  "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a";
+
 export const port = 8000;
 
 // Passed explicitly into the worker's chain config below, rather than relying on the app's own
 // default, so callers needing to mine confirming blocks (e.g. `relay.test.ts`) have one shared,
 // explicit source of truth for how many are required instead of an assumed/hardcoded number.
 export const confirmations = 1;
+
+// Same as `confirmations` above, but for how many blocks the worker waits for a transaction to
+// even land in the mempool before giving up on it as stale.
+export const inclusionWaitBlocks = 2;
 
 // Minimizes every worker delay/poll cadence, trading CPU usage for latency, so tests aren't
 // stuck waiting out multi-second production defaults (e.g. the 1s batch-retry or 2s block-poll
@@ -37,9 +46,12 @@ const testConfig = {
   burnNonceDelayMaxMs: 1,
 };
 
-export async function startApp(): Promise<Deno.ChildProcess> {
+export async function startApp(privateKey: Hex = workerPrivateKey): Promise<Deno.ChildProcess> {
   const config = {
-    wallets: [{ privateKey: workerPrivateKey, chains: [{ chainId: foundry.id, confirmations }] }],
+    wallets: [{
+      privateKey,
+      chains: [{ chainId: foundry.id, confirmations, inclusionWaitBlocks }],
+    }],
   };
   const command = new Deno.Command("deno", {
     args: ["task", "start"],

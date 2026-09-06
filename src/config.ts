@@ -85,7 +85,8 @@ export function getConfig(): Config {
       const chain = chains.get(chainId);
       if (!chain) throw new Error("Unknown wallet chain ID " + chainId);
       const transport = fallback(rpcUrls.length ? rpcUrls.map((url) => http(url)) : [http()]);
-      const client = createWalletClient({ account, chain, transport }).extend(publicActions);
+      const client = createWalletClient({ account, chain, transport, cacheTime: 0 })
+        .extend(publicActions);
 
       chainConfigs.push({
         client,

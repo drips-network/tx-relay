@@ -42,6 +42,23 @@ export async function setBlockGasLimit(gas: bigint) {
   });
 }
 
+// Every transaction currently pending or queued in the mempool, in full (not just their count
+// or hash), so callers can e.g. resubmit one verbatim after it's been dropped.
+export async function getTxpoolTxs() {
+  const content = await anvilClient.getTxpoolContent();
+  return [...Object.values(content.pending), ...Object.values(content.queued)]
+    .flatMap((byNonce) => Object.values(byNonce));
+}
+
+// Drops every pending and queued transaction from the mempool, so none of them can ever be
+// mined - e.g. to simulate one being lost/abandoned rather than merely taking a while.
+export async function dropPendingTxs() {
+  const txs = await getTxpoolTxs();
+  for (const { hash } of txs) {
+    await anvilClient.request({ method: "anvil_dropTransaction", params: [hash] });
+  }
+}
+
 // Polls the mempool until it holds exactly `pending` pending and `queued` queued transactions.
 // Throws immediately if either count overshoots its target, since that means something
 // unexpected is happening rather than the target state simply not being reached yet.
