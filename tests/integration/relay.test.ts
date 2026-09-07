@@ -608,6 +608,155 @@ Deno.test({
 });
 
 Deno.test({
+  name: "send-sequences: reviving an older reprice makes the next one match it, not the newest",
+  timeout: 30_000,
+  async fn() {
+    const arg: SendSequencesArg = {
+      sequences: [{ chainId, bursts: [{ calls: [addLog("ok")] }] }],
+    };
+    const [sequenceId] = await sendSequences(arg);
+    await waitForTxpoolCounts(1);
+
+    const [{ hash: firstTxHash }] = await getTxpoolTxs();
+    const firstTx = await anvilClient.getTransaction({ hash: firstTxHash });
+
+    // 1st reprice: the original TX is priced out, so the app sends a repriced replacement -
+    // captured in full so it can be restored later, the same as in the single-reprice case.
+    await mineEmptyBlocks(inclusionWaitBlocks);
+    const secondTxHash = await waitForNewTxpoolTx(firstTxHash);
+    const secondTx = await anvilClient.getTransaction({ hash: secondTxHash });
+    await assertRepriced(firstTx, secondTx);
+
+    // 2nd reprice: the 1st reprice is ALSO priced out, so the app sends another, pricier one.
+    await mineEmptyBlocks(inclusionWaitBlocks);
+    const thirdTxHash = await waitForNewTxpoolTx(secondTxHash);
+    const thirdTx = await anvilClient.getTransaction({ hash: thirdTxHash });
+    await assertRepriced(secondTx, thirdTx);
+
+    // The 2nd reprice is dropped, and the 1st reprice - captured above, before Anvil's own
+    // replace-by-fee handling evicted it in favor of the 2nd - is restored in its place.
+    await dropPendingTxs();
+    await resubmitTx(secondTx);
+    await waitForTxpoolCounts(1);
+
+    // The app still believes its latest attempt was the (now-gone) 2nd reprice, but since that's
+    // no longer found on-chain, `increasedFees` falls back to the next hash it still recognizes -
+    // the 1st reprice, now visibly pending again - and reprices relative to THAT, not the 2nd. By
+    // now the burst's own TX has already been retried 3 times (the original plus the 1st and 2nd
+    // reprices), so this 3rd reprice is the nonce-burning attempt (see
+    // `sendTxAttempt`/`burnNonce`) - which reprices exactly the same way, so the same invariant
+    // still applies.
+    await mineEmptyBlocks(inclusionWaitBlocks);
+    const fourthTxHash = await waitForNewTxpoolTx(secondTxHash);
+    const fourthTx = await anvilClient.getTransaction({ hash: fourthTxHash });
+    await assertRepriced(secondTx, fourthTx);
+    // Asserting fourthTx's exact fee (rather than just that it's NOT a bump over the 2nd) would be
+    // fragile - the network's fee estimate can drift block to block, even on Anvil, so the 1st
+    // reprice's own bump isn't guaranteed to reproduce bit-for-bit.
+    const minIncrease = (fee: bigint) => fee * BigInt(100 + minGasIncreasePercent) / 100n;
+    assert(
+      fourthTx.maxFeePerGas! < minIncrease(thirdTx.maxFeePerGas!) ||
+        fourthTx.maxPriorityFeePerGas! < minIncrease(thirdTx.maxPriorityFeePerGas!),
+      "Expected the 3rd reprice to NOT be a bump over the 2nd - got " +
+        `${fourthTx.maxFeePerGas}/${fourthTx.maxPriorityFeePerGas}, which is already a ` +
+        `${minGasIncreasePercent}% bump over the 2nd's ` +
+        `${thirdTx.maxFeePerGas}/${thirdTx.maxPriorityFeePerGas}`,
+    );
+
+    // The burn TX still gets mined normally, skipping the burst instead of failing it - then it's
+    // resent fresh, with a reset fee estimate, at the next nonce and succeeds.
+    await mineNextTx();
+    await assertSequenceState(sequenceId, { successes: 0, failures: 0, pending: 1 });
+    await mineNextTx();
+    await assertSequenceState(sequenceId, { successes: 1, failures: 0 });
+    await assertLogs(["ok"]);
+  },
+});
+
+Deno.test({
+  name: "send-sequences: an early attempt is restored and mined after nonce burning starts",
+  timeout: 30_000,
+  async fn() {
+    const arg: SendSequencesArg = {
+      sequences: [{ chainId, bursts: [{ calls: [addLog("ok")] }] }],
+    };
+    const [sequenceId] = await sendSequences(arg);
+    await waitForTxpoolCounts(1);
+
+    const [{ hash: firstTxHash }] = await getTxpoolTxs();
+
+    // The 2nd attempt (1st reprice) - captured in full so it can be restored later, well after
+    // the worker's moved on from it.
+    await mineEmptyBlocks(inclusionWaitBlocks);
+    const secondTxHash = await waitForNewTxpoolTx(firstTxHash);
+    const secondTx = await anvilClient.getTransaction({ hash: secondTxHash });
+
+    // The 3rd attempt (2nd reprice) - the last of the 3 tries before the worker gives up resending
+    // the burst's own TX and starts burning the nonce instead (see `sendTxAttempt`/`burnNonce`).
+    await mineEmptyBlocks(inclusionWaitBlocks);
+    const thirdTxHash = await waitForNewTxpoolTx(secondTxHash);
+
+    // The nonce-burning TX - reaching this confirms the worker's given up on the burst's own TX
+    // entirely.
+    await mineEmptyBlocks(inclusionWaitBlocks);
+    await waitForNewTxpoolTx(thirdTxHash);
+
+    // The 2nd attempt is restored - despite the burn TX being the worker's latest by far, this
+    // much earlier one lands and mines instead, still recognized as this sequence's success since
+    // `watchTxs` tracks every historical attempt's hash, not just the latest.
+    await dropPendingTxs();
+    await resubmitTx(secondTx);
+    await mineNextTx();
+
+    await assertSequenceState(sequenceId, { successes: 1, failures: 0 });
+    await assertLogs(["ok"]);
+  },
+});
+
+Deno.test({
+  name: "send-sequences: a burst reverting on-chain, after the TX was already built, " +
+    "cascades to the bursts after it",
+  timeout: 30_000,
+  async fn() {
+    // Cheap enough that all 3 fit in a single batch/TX together.
+    const arg: SendSequencesArg = {
+      sequences: [{
+        chainId,
+        bursts: [
+          { calls: [addLog("a")] },
+          { calls: [addLog("b")] },
+          { calls: [addLog("c")] },
+        ],
+      }],
+    };
+    const [sequenceId] = await sendSequences(arg);
+    await waitForTxpoolCounts(1);
+
+    const [{ hash: txHash }] = await getTxpoolTxs();
+    const tx = await anvilClient.getTransaction({ hash: txHash });
+    await dropPendingTxs();
+
+    // Set up from the maintenance wallet, not the app's own - using the app's wallet for this
+    // would consume a nonce it doesn't know about and desync its tracking. The TX above was
+    // already built (and signed) before this, so the app has no way to notice ahead of time.
+    const { target, calldata } = setReverts("b");
+    const setRevertsHash = await anvilClient.sendTransaction({ to: target, data: calldata });
+    await anvilClient.mine({ blocks: 1 });
+    await anvilClient.waitForTransactionReceipt({ hash: setRevertsHash });
+
+    // The original TX is restored and lands as originally built, all 3 bursts bundled together.
+    await resubmitTx(tx);
+    await mineNextTx();
+
+    // The 2nd burst reverts on-chain; the 3rd, which needs the 2nd to have succeeded (see
+    // `Executor.sol`'s `needsPrev`), is skipped and fails alongside it - even though its own call
+    // would have succeeded in isolation.
+    await assertSequenceState(sequenceId, { successes: 1, failures: 2 });
+    await assertLogs(["a"]);
+  },
+});
+
+Deno.test({
   name: "send-sequences: a dummy TX using up the nonce makes the app skip and resend",
   timeout: 30_000,
   async fn() {
