@@ -36,9 +36,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.8.1
       - name: Type check
         run: deno check
       - name: Format check
@@ -52,6 +57,12 @@ jobs:
             git diff -- drizzle
             exit 1
           fi
+      # Compares only the compiled bytecode (see `trimMetadata` in generate-contracts.ts) rather
+      # than diffing the generated files outright, since Solidity's metadata trailer embeds a
+      # hash covering absolute source paths and differs between machines/Foundry versions even
+      # when the contract itself hasn't changed.
+      - name: Verify generated contract bindings are up to date
+        run: deno task contracts-generate-check
 
   integration:
     name: Integration tests
