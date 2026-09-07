@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    name: Contracts
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contracts
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.8.1
+      - name: Build (deny warnings)
+        run: forge build --deny warnings
+      - name: Lint
+        run: forge lint
+      - name: Format check
+        run: forge fmt --check
+      - name: Test
+        run: forge test
+
+  deno:
+    name: Deno
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Type check
+        run: deno check
+      - name: Format check
+        run: deno fmt --check
+      - name: Verify drizzle migrations are up to date
+        run: |
+          deno task drizzle-generate
+          if [ -n "$(git status --porcelain -- drizzle)" ]; then
+            echo "::error::drizzle/ is out of date with src/db/schema.ts \
+              - run 'deno task drizzle-generate' and commit the result."
+            git diff -- drizzle
+            exit 1
+          fi
+
+  integration:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Start Postgres and Anvil
+        run: docker compose up -d --wait
+      - name: Run integration tests
+        run: deno task test-integration
