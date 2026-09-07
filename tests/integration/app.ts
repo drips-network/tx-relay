@@ -1,5 +1,5 @@
 import { delay, retry } from "async";
-import { assert } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { Hex } from "viem";
 import { foundry } from "viem/chains";
 import {
@@ -9,6 +9,7 @@ import {
   type SequencesStatesArg,
   sequencesStatesSchema,
 } from "../../src/app.ts";
+import { type SequenceEvent } from "../../src/db/schema.ts";
 
 // Anvil's default account #0, pre-funded with test ETH. This is the wallet the app's own
 // worker uses to send transactions - tests must never use it for their own on-chain setup
@@ -102,9 +103,15 @@ export async function sendSequences(arg: SendSequencesArg): Promise<string[]> {
 // counts. Throws immediately if successes or failures overshoot, or pending undershoots, since
 // that means the sequence resolved differently than expected rather than just not being there
 // yet.
+//
+// If `events` is given, it's checked once that final state is reached: their timestamps must be
+// non-decreasing (ties are allowed - events inserted together in the same DB transaction all
+// share Postgres' `now()` for that transaction), and their kinds and details must exactly match
+// `events`, in order.
 export async function assertSequenceState(
   id: string,
   expectedState: { successes: number; failures: number; pending?: number },
+  events?: SequenceEvent[],
 ) {
   const { successes, failures, pending = 0 } = expectedState;
   while (true) {
@@ -117,6 +124,7 @@ export async function assertSequenceState(
     assert(response.ok, `/sequences-states returned ${response.status}`);
     const { sequences: [state] } = sequencesStatesSchema.parse(await response.json());
     if (state.successes === successes && state.failures === failures && state.pending === pending) {
+      if (events) assertEvents(state.events, events);
       return;
     }
     if (state.successes > successes || state.failures > failures || state.pending < pending) {
@@ -127,4 +135,19 @@ export async function assertSequenceState(
     }
     await delay(50);
   }
+}
+
+function assertEvents(
+  events: (SequenceEvent & { timestamp: Date })[],
+  expected: SequenceEvent[],
+) {
+  for (let i = 1; i < events.length; i++) {
+    assert(
+      events[i].timestamp.getTime() >= events[i - 1].timestamp.getTime(),
+      `Expected event timestamps to be non-decreasing, but event ${i} (${events[i].kind}) at ` +
+        `${events[i].timestamp.toISOString()} precedes event ${i - 1} (${events[i - 1].kind}) at ` +
+        `${events[i - 1].timestamp.toISOString()}`,
+    );
+  }
+  assertEquals(events.map(({ timestamp: _timestamp, ...event }) => event), expected);
 }

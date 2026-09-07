@@ -29,6 +29,7 @@ import {
 import { addLog, assertLogs, deployCallsLog, setGasPenalty, setReverts } from "./calls-log.ts";
 import { resetDb } from "./db.ts";
 import { type SendSequencesArg } from "../../src/app.ts";
+import { type SequenceEvent } from "../../src/db/schema.ts";
 
 const chainId = anvilClient.chain.id;
 
@@ -151,7 +152,11 @@ Deno.test({
     const [successId] = await sendSequences(arg);
     await mineNextTx();
 
-    await assertSequenceState(successId, { successes: 1, failures: 0 });
+    await assertSequenceState(successId, { successes: 1, failures: 0 }, [
+      { kind: "created", details: { burstsCount: 1 } },
+      { kind: "submitted", details: { fromIdxInSequence: 0, burstsCount: 1 } },
+      { kind: "executed", details: { fromIdxInSequence: 0, successes: 1, failed: false } },
+    ]);
     await assertLogs(["ok"]);
   },
 });
@@ -167,7 +172,10 @@ Deno.test({
     };
     const [revertingId] = await sendSequences(arg);
 
-    await assertSequenceState(revertingId, { successes: 0, failures: 1 });
+    await assertSequenceState(revertingId, { successes: 0, failures: 1 }, [
+      { kind: "created", details: { burstsCount: 1 } },
+      { kind: "rejected", details: { fromIdxInSequence: 0 } },
+    ]);
     await assertLogs([]);
   },
 });
@@ -199,7 +207,12 @@ Deno.test({
     // Once the 1st burst is mined, the 2nd is retried as the sole item in a fresh batch, so this
     // time it's rejected outright - which fails the rest of the sequence (the 3rd) without ever
     // attempting it.
-    await assertSequenceState(sequenceId, { successes: 1, failures: 2 });
+    await assertSequenceState(sequenceId, { successes: 1, failures: 2 }, [
+      { kind: "created", details: { burstsCount: 3 } },
+      { kind: "submitted", details: { fromIdxInSequence: 0, burstsCount: 1 } },
+      { kind: "executed", details: { fromIdxInSequence: 0, successes: 1, failed: false } },
+      { kind: "rejected", details: { fromIdxInSequence: 1 } },
+    ]);
     await assertLogs(["a"]);
   },
 });
@@ -218,10 +231,17 @@ Deno.test({
       ],
     };
     const [successId, revertingId] = await sendSequences(arg);
-    await assertSequenceState(revertingId, { successes: 0, failures: 1 });
+    await assertSequenceState(revertingId, { successes: 0, failures: 1 }, [
+      { kind: "created", details: { burstsCount: 1 } },
+      { kind: "rejected", details: { fromIdxInSequence: 0 } },
+    ]);
     await mineNextTx();
 
-    await assertSequenceState(successId, { successes: 1, failures: 0 });
+    await assertSequenceState(successId, { successes: 1, failures: 0 }, [
+      { kind: "created", details: { burstsCount: 1 } },
+      { kind: "submitted", details: { fromIdxInSequence: 0, burstsCount: 1 } },
+      { kind: "executed", details: { fromIdxInSequence: 0, successes: 1, failed: false } },
+    ]);
     await assertLogs(["ok"]);
   },
 });
@@ -245,8 +265,15 @@ Deno.test({
     await assertSequenceState(triggerId, { successes: 0, failures: 0, pending: 1 });
     await mineNextTx();
 
-    await assertSequenceState(setupId, { successes: 1, failures: 0 });
-    await assertSequenceState(triggerId, { successes: 0, failures: 1 });
+    await assertSequenceState(setupId, { successes: 1, failures: 0 }, [
+      { kind: "created", details: { burstsCount: 1 } },
+      { kind: "submitted", details: { fromIdxInSequence: 0, burstsCount: 1 } },
+      { kind: "executed", details: { fromIdxInSequence: 0, successes: 1, failed: false } },
+    ]);
+    await assertSequenceState(triggerId, { successes: 0, failures: 1 }, [
+      { kind: "created", details: { burstsCount: 1 } },
+      { kind: "rejected", details: { fromIdxInSequence: 0 } },
+    ]);
     await assertLogs([]);
   },
 });
@@ -265,7 +292,10 @@ Deno.test({
     };
     const [sequenceId] = await sendSequences(arg);
 
-    await assertSequenceState(sequenceId, { successes: 0, failures: 1 });
+    await assertSequenceState(sequenceId, { successes: 0, failures: 1 }, [
+      { kind: "created", details: { burstsCount: 1 } },
+      { kind: "rejected", details: { fromIdxInSequence: 0 } },
+    ]);
     await assertLogs([]);
   },
 });
@@ -291,7 +321,13 @@ Deno.test({
     await assertSequenceState(sequenceId, { successes: 1, failures: 0, pending: 1 });
     await mineNextTx();
 
-    await assertSequenceState(sequenceId, { successes: 2, failures: 0 });
+    await assertSequenceState(sequenceId, { successes: 2, failures: 0 }, [
+      { kind: "created", details: { burstsCount: 2 } },
+      { kind: "submitted", details: { fromIdxInSequence: 0, burstsCount: 1 } },
+      { kind: "executed", details: { fromIdxInSequence: 0, successes: 1, failed: false } },
+      { kind: "submitted", details: { fromIdxInSequence: 1, burstsCount: 1 } },
+      { kind: "executed", details: { fromIdxInSequence: 1, successes: 1, failed: false } },
+    ]);
     await assertLogs(["a", "b"]);
   },
 });
@@ -320,7 +356,12 @@ Deno.test({
     await assertSequenceState(sequenceId, { successes: 0, failures: 0, pending: 2 });
     await mineNextTx();
 
-    await assertSequenceState(sequenceId, { successes: 1, failures: 1 });
+    await assertSequenceState(sequenceId, { successes: 1, failures: 1 }, [
+      { kind: "created", details: { burstsCount: 2 } },
+      { kind: "submitted", details: { fromIdxInSequence: 0, burstsCount: 1 } },
+      { kind: "executed", details: { fromIdxInSequence: 0, successes: 1, failed: false } },
+      { kind: "rejected", details: { fromIdxInSequence: 1 } },
+    ]);
     await assertLogs(["a"]);
   },
 });
@@ -342,8 +383,13 @@ Deno.test({
     await assertSequenceState(seq1Id, { successes: 1, failures: 0 });
     await assertSequenceState(seq2Id, { successes: 0, failures: 0, pending: 1 });
     await mineNextTx();
-    await assertSequenceState(seq1Id, { successes: 1, failures: 0 });
-    await assertSequenceState(seq2Id, { successes: 1, failures: 0 });
+    const expectedSingleBurstEvents: SequenceEvent[] = [
+      { kind: "created", details: { burstsCount: 1 } },
+      { kind: "submitted", details: { fromIdxInSequence: 0, burstsCount: 1 } },
+      { kind: "executed", details: { fromIdxInSequence: 0, successes: 1, failed: false } },
+    ];
+    await assertSequenceState(seq1Id, { successes: 1, failures: 0 }, expectedSingleBurstEvents);
+    await assertSequenceState(seq2Id, { successes: 1, failures: 0 }, expectedSingleBurstEvents);
     await assertLogs(["a", "b"]);
   },
 });
@@ -373,8 +419,18 @@ Deno.test({
     await assertSequenceState(seq2Id, { successes: 1, failures: 0, pending: 1 });
     await mineNextTx();
 
-    await assertSequenceState(seq1Id, { successes: 1, failures: 0 });
-    await assertSequenceState(seq2Id, { successes: 2, failures: 0 });
+    await assertSequenceState(seq1Id, { successes: 1, failures: 0 }, [
+      { kind: "created", details: { burstsCount: 1 } },
+      { kind: "submitted", details: { fromIdxInSequence: 0, burstsCount: 1 } },
+      { kind: "executed", details: { fromIdxInSequence: 0, successes: 1, failed: false } },
+    ]);
+    await assertSequenceState(seq2Id, { successes: 2, failures: 0 }, [
+      { kind: "created", details: { burstsCount: 2 } },
+      { kind: "submitted", details: { fromIdxInSequence: 0, burstsCount: 1 } },
+      { kind: "executed", details: { fromIdxInSequence: 0, successes: 1, failed: false } },
+      { kind: "submitted", details: { fromIdxInSequence: 1, burstsCount: 1 } },
+      { kind: "executed", details: { fromIdxInSequence: 1, successes: 1, failed: false } },
+    ]);
     await assertLogs(["a", "b", "c"]);
   },
 });
@@ -398,10 +454,17 @@ Deno.test({
       ],
     };
     const [underId, overId] = await sendSequences(arg);
-    await assertSequenceState(overId, { successes: 0, failures: 1 });
+    await assertSequenceState(overId, { successes: 0, failures: 1 }, [
+      { kind: "created", details: { burstsCount: 1 } },
+      { kind: "rejected", details: { fromIdxInSequence: 0 } },
+    ]);
     await mineNextTx();
 
-    await assertSequenceState(underId, { successes: 1, failures: 0 });
+    await assertSequenceState(underId, { successes: 1, failures: 0 }, [
+      { kind: "created", details: { burstsCount: 1 } },
+      { kind: "submitted", details: { fromIdxInSequence: 0, burstsCount: 1 } },
+      { kind: "executed", details: { fromIdxInSequence: 0, successes: 1, failed: false } },
+    ]);
     await assertLogs(["under"]);
   },
 });
@@ -424,7 +487,11 @@ Deno.test({
     const [sequenceId] = await sendSequences(arg);
     const blockNumber = await mineNextTx();
 
-    await assertSequenceState(sequenceId, { successes: 1, failures: 0 });
+    await assertSequenceState(sequenceId, { successes: 1, failures: 0 }, [
+      { kind: "created", details: { burstsCount: 1 } },
+      { kind: "submitted", details: { fromIdxInSequence: 0, burstsCount: 1 } },
+      { kind: "executed", details: { fromIdxInSequence: 0, successes: 1, failed: false } },
+    ]);
     await assertLogs(["buffered"]);
 
     const block = await anvilClient.getBlock({ blockNumber, includeTransactions: true });
@@ -450,7 +517,11 @@ Deno.test({
     app = await startApp();
 
     await mineNextTx();
-    await assertSequenceState(sequenceId, { successes: 1, failures: 0 });
+    await assertSequenceState(sequenceId, { successes: 1, failures: 0 }, [
+      { kind: "created", details: { burstsCount: 1 } },
+      { kind: "submitted", details: { fromIdxInSequence: 0, burstsCount: 1 } },
+      { kind: "executed", details: { fromIdxInSequence: 0, successes: 1, failed: false } },
+    ]);
     await assertLogs(["ok"]);
   },
 });
@@ -485,7 +556,13 @@ Deno.test({
     await assertSequenceState(sequenceId, { successes: 0, failures: 0, pending: 1 });
 
     const blockNumber = await mineNextTx();
-    await assertSequenceState(sequenceId, { successes: 1, failures: 0 });
+    await assertSequenceState(sequenceId, { successes: 1, failures: 0 }, [
+      { kind: "created", details: { burstsCount: 1 } },
+      { kind: "submitted", details: { fromIdxInSequence: 0, burstsCount: 1 } },
+      { kind: "skipped", details: {} },
+      { kind: "submitted", details: { fromIdxInSequence: 0, burstsCount: 1 } },
+      { kind: "executed", details: { fromIdxInSequence: 0, successes: 1, failed: false } },
+    ]);
     await assertLogs(["ok"]);
 
     const block = await anvilClient.getBlock({ blockNumber, includeTransactions: true });
@@ -525,7 +602,11 @@ Deno.test({
     await resubmitTx(firstTx);
     await mineNextTx();
 
-    await assertSequenceState(sequenceId, { successes: 1, failures: 0 });
+    await assertSequenceState(sequenceId, { successes: 1, failures: 0 }, [
+      { kind: "created", details: { burstsCount: 1 } },
+      { kind: "submitted", details: { fromIdxInSequence: 0, burstsCount: 1 } },
+      { kind: "executed", details: { fromIdxInSequence: 0, successes: 1, failed: false } },
+    ]);
     await assertLogs(["ok"]);
   },
 });
@@ -555,7 +636,11 @@ Deno.test({
     await assertRepriced(firstTx, secondTx);
 
     await mineNextTx();
-    await assertSequenceState(sequenceId, { successes: 1, failures: 0 });
+    await assertSequenceState(sequenceId, { successes: 1, failures: 0 }, [
+      { kind: "created", details: { burstsCount: 1 } },
+      { kind: "submitted", details: { fromIdxInSequence: 0, burstsCount: 1 } },
+      { kind: "executed", details: { fromIdxInSequence: 0, successes: 1, failed: false } },
+    ]);
     await assertLogs(["ok"]);
   },
 });
@@ -603,7 +688,13 @@ Deno.test({
     await mineNextTx();
     await assertSequenceState(sequenceId, { successes: 0, failures: 0, pending: 1 });
     await mineNextTx();
-    await assertSequenceState(sequenceId, { successes: 1, failures: 0 });
+    await assertSequenceState(sequenceId, { successes: 1, failures: 0 }, [
+      { kind: "created", details: { burstsCount: 1 } },
+      { kind: "submitted", details: { fromIdxInSequence: 0, burstsCount: 1 } },
+      { kind: "skipped", details: {} },
+      { kind: "submitted", details: { fromIdxInSequence: 0, burstsCount: 1 } },
+      { kind: "executed", details: { fromIdxInSequence: 0, successes: 1, failed: false } },
+    ]);
     await assertLogs(["ok"]);
   },
 });
@@ -669,7 +760,13 @@ Deno.test({
     await mineNextTx();
     await assertSequenceState(sequenceId, { successes: 0, failures: 0, pending: 1 });
     await mineNextTx();
-    await assertSequenceState(sequenceId, { successes: 1, failures: 0 });
+    await assertSequenceState(sequenceId, { successes: 1, failures: 0 }, [
+      { kind: "created", details: { burstsCount: 1 } },
+      { kind: "submitted", details: { fromIdxInSequence: 0, burstsCount: 1 } },
+      { kind: "skipped", details: {} },
+      { kind: "submitted", details: { fromIdxInSequence: 0, burstsCount: 1 } },
+      { kind: "executed", details: { fromIdxInSequence: 0, successes: 1, failed: false } },
+    ]);
     await assertLogs(["ok"]);
   },
 });
@@ -706,7 +803,13 @@ Deno.test({
       await anvilClient.mine({ blocks: 1 });
     }
 
-    await assertSequenceState(sequenceId, { successes: 1, failures: 0 });
+    await assertSequenceState(sequenceId, { successes: 1, failures: 0 }, [
+      { kind: "created", details: { burstsCount: 1 } },
+      { kind: "submitted", details: { fromIdxInSequence: 0, burstsCount: 1 } },
+      { kind: "skipped", details: {} },
+      { kind: "submitted", details: { fromIdxInSequence: 0, burstsCount: 1 } },
+      { kind: "executed", details: { fromIdxInSequence: 0, successes: 1, failed: false } },
+    ]);
     await assertLogs(["ok"]);
   },
 });
@@ -746,7 +849,11 @@ Deno.test({
     await resubmitTx(secondTx);
     await mineNextTx();
 
-    await assertSequenceState(sequenceId, { successes: 1, failures: 0 });
+    await assertSequenceState(sequenceId, { successes: 1, failures: 0 }, [
+      { kind: "created", details: { burstsCount: 1 } },
+      { kind: "submitted", details: { fromIdxInSequence: 0, burstsCount: 1 } },
+      { kind: "executed", details: { fromIdxInSequence: 0, successes: 1, failed: false } },
+    ]);
     await assertLogs(["ok"]);
   },
 });
@@ -789,7 +896,11 @@ Deno.test({
     // The 2nd burst reverts on-chain; the 3rd, which needs the 2nd to have succeeded (see
     // `Executor.sol`'s `needsPrev`), is skipped and fails alongside it - even though its own call
     // would have succeeded in isolation.
-    await assertSequenceState(sequenceId, { successes: 1, failures: 2 });
+    await assertSequenceState(sequenceId, { successes: 1, failures: 2 }, [
+      { kind: "created", details: { burstsCount: 3 } },
+      { kind: "submitted", details: { fromIdxInSequence: 0, burstsCount: 3 } },
+      { kind: "executed", details: { fromIdxInSequence: 0, successes: 1, failed: true } },
+    ]);
     await assertLogs(["a"]);
   },
 });
@@ -819,7 +930,13 @@ Deno.test({
     // Funded enough for the burst itself, so the fresh batch built for it succeeds normally.
     await anvilClient.setBalance({ address: workerAddress, value: parseEther("1") });
     await mineNextTx();
-    await assertSequenceState(sequenceId, { successes: 1, failures: 0 });
+    await assertSequenceState(sequenceId, { successes: 1, failures: 0 }, [
+      { kind: "created", details: { burstsCount: 1 } },
+      { kind: "submitted", details: { fromIdxInSequence: 0, burstsCount: 1 } },
+      { kind: "skipped", details: {} },
+      { kind: "submitted", details: { fromIdxInSequence: 0, burstsCount: 1 } },
+      { kind: "executed", details: { fromIdxInSequence: 0, successes: 1, failed: false } },
+    ]);
     await assertLogs(["heavy"]);
   },
 });
@@ -866,7 +983,13 @@ Deno.test({
 
     // The fresh batch built for it succeeds normally.
     await mineNextTx();
-    await assertSequenceState(sequenceId, { successes: 1, failures: 0 });
+    await assertSequenceState(sequenceId, { successes: 1, failures: 0 }, [
+      { kind: "created", details: { burstsCount: 1 } },
+      { kind: "submitted", details: { fromIdxInSequence: 0, burstsCount: 1 } },
+      { kind: "skipped", details: {} },
+      { kind: "submitted", details: { fromIdxInSequence: 0, burstsCount: 1 } },
+      { kind: "executed", details: { fromIdxInSequence: 0, successes: 1, failed: false } },
+    ]);
     await assertLogs(["heavy"]);
   },
 });
@@ -905,7 +1028,13 @@ Deno.test({
       await anvilClient.mine({ blocks: 1 });
     }
 
-    await assertSequenceState(sequenceId, { successes: 1, failures: 0 });
+    await assertSequenceState(sequenceId, { successes: 1, failures: 0 }, [
+      { kind: "created", details: { burstsCount: 1 } },
+      { kind: "submitted", details: { fromIdxInSequence: 0, burstsCount: 1 } },
+      { kind: "skipped", details: {} },
+      { kind: "submitted", details: { fromIdxInSequence: 0, burstsCount: 1 } },
+      { kind: "executed", details: { fromIdxInSequence: 0, successes: 1, failed: false } },
+    ]);
     await assertLogs(["ok"]);
   },
 });
@@ -935,7 +1064,13 @@ Deno.test({
     await assertSequenceState(sequenceId, { successes: 0, failures: 0, pending: 1 });
 
     await mineNextTx();
-    await assertSequenceState(sequenceId, { successes: 1, failures: 0 });
+    await assertSequenceState(sequenceId, { successes: 1, failures: 0 }, [
+      { kind: "created", details: { burstsCount: 1 } },
+      { kind: "submitted", details: { fromIdxInSequence: 0, burstsCount: 1 } },
+      { kind: "skipped", details: {} },
+      { kind: "submitted", details: { fromIdxInSequence: 0, burstsCount: 1 } },
+      { kind: "executed", details: { fromIdxInSequence: 0, successes: 1, failed: false } },
+    ]);
     await assertLogs(["ok"]);
   },
 });
