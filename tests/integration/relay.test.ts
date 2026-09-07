@@ -30,29 +30,35 @@ const chainId = anvilClient.chain.id;
 let checkpointId: `0x${string}`;
 let app: Deno.ChildProcess;
 
-async function mineConfirmations() {
-  await anvilClient.mine({ blocks: confirmations });
-}
-
 // Requires automine to be off. Waits for exactly one pending transaction and none queued, then
-// mines it plus the confirmation blocks it needs.
+// mines it plus its confirmation blocks, returning the block it landed in.
 // Mining is unaffected by automine being off - it still packs in whatever is pending.
-async function mineNextTx() {
+//
+// Mined in two steps with a real pause in between, rather than one fixed-size batch: the worker's
+// own check for whether something else has taken its nonce (see `watchTxs`) can rarely race its
+// receipt check at this mining speed (never at real block times), taking a detour that needs
+// `confirmations` more blocks than usual. That detour computes its wait target from the chain
+// height at the moment it's taken, so a single, larger mine call can't pre-empt it - the target
+// just becomes that much higher, always one `confirmations` step past whatever was last mined.
+// Splitting into two calls lets that target, if taken, settle against the first call's height
+// before the second one covers it.
+async function mineNextTx(): Promise<bigint> {
   await waitForTxpoolCounts(1);
-  await anvilClient.mine({ blocks: 1 });
-  await mineConfirmations();
+  const [{ hash }] = await getTxpoolTxs();
+  await anvilClient.mine({ blocks: 1 + confirmations });
+  await delay(20);
+  await anvilClient.mine({ blocks: confirmations });
+  return (await anvilClient.getTransactionReceipt({ hash })).blockNumber;
 }
 
 Deno.test.beforeAll(async () => {
-  await resetToGenesis();
-  await setBlockGasLimit(1_000_000n);
-  await etchSingletonFactory();
-
-  await deployCallsLog();
-
   // Disabled for the whole suite so every transaction has to be mined explicitly (see
   // `mineNextTx`), rather than relying on Anvil's automine to include it as soon as it's sent.
   await anvilClient.setAutomine(false);
+  await resetToGenesis();
+  await setBlockGasLimit(1_000_000n);
+  await etchSingletonFactory();
+  await deployCallsLog();
 });
 
 Deno.test.beforeEach(async () => {
@@ -370,18 +376,12 @@ Deno.test({
       }],
     };
     const [sequenceId] = await sendSequences(arg);
-    await mineNextTx();
+    const blockNumber = await mineNextTx();
 
     await assertSequenceState(sequenceId, { successes: 1, failures: 0 });
     await assertLogs(["buffered"]);
 
-    // `mineNextTx` mines the transaction, then `confirmations` further blocks on top of it, so
-    // the transaction's block is `confirmations` behind the current one.
-    const blockNumber = await anvilClient.getBlockNumber();
-    const block = await anvilClient.getBlock({
-      blockNumber: blockNumber - BigInt(confirmations),
-      includeTransactions: true,
-    });
+    const block = await anvilClient.getBlock({ blockNumber, includeTransactions: true });
     assertEquals(block.transactions.length, 1);
     assert(
       block.transactions[0].gas >= 750_000n,
@@ -438,17 +438,11 @@ Deno.test({
     await anvilClient.mine({ blocks: inclusionWaitBlocks });
     await assertSequenceState(sequenceId, { successes: 0, failures: 0, pending: 1 });
 
-    await mineNextTx();
+    const blockNumber = await mineNextTx();
     await assertSequenceState(sequenceId, { successes: 1, failures: 0 });
     await assertLogs(["ok"]);
 
-    // `mineNextTx` mines the transaction, then `confirmations` further blocks on top of it, so
-    // the transaction's block is `confirmations` behind the current one.
-    const blockNumber = await anvilClient.getBlockNumber();
-    const block = await anvilClient.getBlock({
-      blockNumber: blockNumber - BigInt(confirmations),
-      includeTransactions: true,
-    });
+    const block = await anvilClient.getBlock({ blockNumber, includeTransactions: true });
     assertEquals(block.transactions.length, 1);
     assertEquals(
       block.transactions[0].from.toLowerCase(),
@@ -543,6 +537,36 @@ Deno.test({
       await anvilClient.mine({ blocks: 1 });
     }
 
+    await assertSequenceState(sequenceId, { successes: 1, failures: 0 });
+    await assertLogs(["ok"]);
+  },
+});
+
+Deno.test({
+  name:
+    "send-sequences: after 3 dropped attempts, the app burns the nonce, then resends and succeeds",
+  timeout: 30_000,
+  async fn() {
+    const arg: SendSequencesArg = {
+      sequences: [{ chainId, bursts: [{ calls: [addLog("ok")] }] }],
+    };
+    const [sequenceId] = await sendSequences(arg);
+
+    // The worker retries the same nonce 3 times before giving up on it - each dropped attempt is
+    // resent only once `inclusionWaitBlocks` have passed without a receipt for it.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await waitForTxpoolCounts(1);
+      await dropPendingTxs();
+      await anvilClient.mine({ blocks: inclusionWaitBlocks });
+    }
+
+    // After the 3rd dropped attempt, the worker burns the nonce instead of retrying the burst
+    // again - the burn TX is let through this time, so the burst itself is left pending rather
+    // than failed, ready to be resent under the next nonce.
+    await mineNextTx();
+    await assertSequenceState(sequenceId, { successes: 0, failures: 0, pending: 1 });
+
+    await mineNextTx();
     await assertSequenceState(sequenceId, { successes: 1, failures: 0 });
     await assertLogs(["ok"]);
   },

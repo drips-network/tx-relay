@@ -14,6 +14,7 @@ function getCallsLogAddress(): Address {
 // Deploys the CallsLog test fixture from the maintenance wallet and returns its address.
 export async function deployCallsLog(): Promise<Address> {
   const hash = await anvilClient.deployContract({ abi: callsLogAbi, bytecode: callsLogBytecode });
+  await anvilClient.mine({ blocks: 1 });
   const receipt = await anvilClient.waitForTransactionReceipt({ hash });
   assert(receipt.contractAddress, "CallsLog deployment failed");
   callsLogAddress = receipt.contractAddress;
