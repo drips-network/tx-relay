@@ -33,6 +33,10 @@ export const confirmations = 1;
 // even land in the mempool before giving up on it as stale.
 export const inclusionWaitBlocks = 2;
 
+// Same as `confirmations` above, but for how much a repriced retry's fee must exceed the previous
+// attempt's.
+export const minGasIncreasePercent = 10;
+
 // Minimizes every worker delay/poll cadence, trading CPU usage for latency, so tests aren't
 // stuck waiting out multi-second production defaults (e.g. the 1s batch-retry or 2s block-poll
 // interval). These fields only exist for this purpose and are never meant to be set in prod.
@@ -50,7 +54,7 @@ export async function startApp(privateKey: Hex = workerPrivateKey): Promise<Deno
   const config = {
     wallets: [{
       privateKey,
-      chains: [{ chainId: foundry.id, confirmations, inclusionWaitBlocks }],
+      chains: [{ chainId: foundry.id, confirmations, inclusionWaitBlocks, minGasIncreasePercent }],
     }],
   };
   const command = new Deno.Command("deno", {

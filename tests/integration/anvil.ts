@@ -1,5 +1,15 @@
+import { assert } from "@std/assert";
 import { delay } from "async";
-import { createTestClient, http, numberToHex, publicActions, walletActions } from "viem";
+import {
+  createTestClient,
+  type Hex,
+  http,
+  numberToHex,
+  publicActions,
+  serializeTransaction,
+  type Transaction,
+  walletActions,
+} from "viem";
 import { foundry } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
 
@@ -35,11 +45,22 @@ export async function etchSingletonFactory() {
 
 // Chain state, like any other set via a transaction, so - unlike automine - it's restored by
 // `evm_revert`/`anvil_snapshot` but wiped by `resetToGenesis`, which needs to reapply it.
-export async function setBlockGasLimit(gas: bigint) {
+// Defaults to the value the test suite runs with, so callers that shrunk it can restore it with a
+// bare call.
+export async function setBlockGasLimit(gas: bigint = 1_000_000n) {
   await anvilClient.request({
     method: "evm_setBlockGasLimit",
     params: [numberToHex(gas)],
   });
+}
+
+// Mines `blocks` blocks with the gas limit shrunk to 1 - too small for anything pending to fit -
+// so the chain advances without any of it being touched, unlike dropping it outright. Restores
+// the default gas limit afterward.
+export async function mineEmptyBlocks(blocks: number) {
+  await setBlockGasLimit(1n);
+  await anvilClient.mine({ blocks });
+  await setBlockGasLimit();
 }
 
 // Every transaction currently pending or queued in the mempool, in full (not just their count
@@ -74,4 +95,37 @@ export async function waitForTxpoolCounts(pending: number, queued = 0) {
     }
     await delay(10);
   }
+}
+
+// Polls the mempool until its single pending transaction is no longer the one with the given
+// hash, returning the new one's hash - e.g. to observe a repriced replacement land.
+export async function waitForNewTxpoolTx(previousHash: Hex): Promise<Hex> {
+  while (true) {
+    const [tx] = await getTxpoolTxs();
+    if (tx && tx.hash !== previousHash) return tx.hash;
+    await delay(10);
+  }
+}
+
+// Resubmits `tx` (as returned by `getTransaction`) verbatim, signature included - e.g. to restore
+// an earlier attempt after a repriced retry replaced it, proving the worker still recognizes
+// success via any of its historical attempts, not just the latest one.
+export async function resubmitTx(tx: Transaction) {
+  assert(tx.type === "eip1559" && tx.yParity !== undefined, "Expected an EIP-1559 transaction");
+  // `serializeTransaction` expects `data`, but the parsed `Transaction` names the same field
+  // `input` - passing `tx` directly would silently serialize it as empty calldata.
+  await anvilClient.sendRawTransaction({
+    serializedTransaction: serializeTransaction({
+      type: "eip1559",
+      chainId: anvilClient.chain.id,
+      nonce: tx.nonce,
+      to: tx.to,
+      value: tx.value,
+      data: tx.input,
+      gas: tx.gas,
+      maxFeePerGas: tx.maxFeePerGas,
+      maxPriorityFeePerGas: tx.maxPriorityFeePerGas,
+      accessList: tx.accessList,
+    }, { r: tx.r, s: tx.s, yParity: tx.yParity }),
+  });
 }

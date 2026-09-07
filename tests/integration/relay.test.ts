@@ -1,11 +1,12 @@
 import { assert, assertEquals } from "@std/assert";
-import { delay } from "async";
-import { createWalletClient, http, publicActions, serializeTransaction } from "viem";
+import { deadline, delay } from "async";
+import { createWalletClient, http, publicActions, type Transaction } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import {
   assertSequenceState,
   confirmations,
   inclusionWaitBlocks,
+  minGasIncreasePercent,
   otherWorkerPrivateKey,
   sendSequences,
   startApp,
@@ -17,8 +18,11 @@ import {
   dropPendingTxs,
   etchSingletonFactory,
   getTxpoolTxs,
+  mineEmptyBlocks,
   resetToGenesis,
+  resubmitTx,
   setBlockGasLimit,
+  waitForNewTxpoolTx,
   waitForTxpoolCounts,
 } from "./anvil.ts";
 import { addLog, assertLogs, deployCallsLog, setGasPenalty, setReverts } from "./calls-log.ts";
@@ -51,12 +55,53 @@ async function mineNextTx(): Promise<bigint> {
   return (await anvilClient.getTransactionReceipt({ hash })).blockNumber;
 }
 
+// Asserts that `secondTx` is a valid repriced replacement of `firstTx` - both EIP-1559, with both
+// fee fields increased by at least `minGasIncreasePercent`, but never by more than 1.5x the
+// current network fee estimate (see `increasedFees` in worker.ts, which refuses to reprice past
+// that cap at all).
+//
+// The current estimate is fetched via `prepareTransactionRequest`, the same call the worker
+// itself uses, rather than the lower-level `estimateFeesPerGas` - the latter's own fee padding
+// isn't necessarily what the worker's client actually applies, and comparing against it directly
+// proved unreliable.
+async function assertRepriced(firstTx: Transaction, secondTx: Transaction) {
+  assert(
+    firstTx.type === "eip1559" && secondTx.type === "eip1559",
+    "Expected both TXs to be EIP-1559",
+  );
+  const minIncrease = (fee: bigint) => fee * BigInt(100 + minGasIncreasePercent) / 100n;
+  const maxCap = (fee: bigint) => fee * 150n / 100n;
+  const { maxFeePerGas: currentFee, maxPriorityFeePerGas: currentPriorityFee } = await anvilClient
+    .prepareTransactionRequest({ account: anvilClient.account, to: anvilClient.account.address });
+
+  assert(
+    secondTx.maxFeePerGas >= minIncrease(firstTx.maxFeePerGas),
+    `Expected maxFeePerGas to increase by at least ${minGasIncreasePercent}%, went from ` +
+      `${firstTx.maxFeePerGas} to ${secondTx.maxFeePerGas}`,
+  );
+  assert(
+    secondTx.maxFeePerGas <= maxCap(currentFee),
+    `Expected maxFeePerGas to not exceed 1.5x the current fee estimate (${currentFee}), got ` +
+      `${secondTx.maxFeePerGas}`,
+  );
+  assert(
+    secondTx.maxPriorityFeePerGas >= minIncrease(firstTx.maxPriorityFeePerGas),
+    `Expected maxPriorityFeePerGas to increase by at least ${minGasIncreasePercent}%, went from ` +
+      `${firstTx.maxPriorityFeePerGas} to ${secondTx.maxPriorityFeePerGas}`,
+  );
+  assert(
+    secondTx.maxPriorityFeePerGas <= maxCap(currentPriorityFee),
+    `Expected maxPriorityFeePerGas to not exceed 1.5x the current fee estimate ` +
+      `(${currentPriorityFee}), got ${secondTx.maxPriorityFeePerGas}`,
+  );
+}
+
 Deno.test.beforeAll(async () => {
   // Disabled for the whole suite so every transaction has to be mined explicitly (see
   // `mineNextTx`), rather than relying on Anvil's automine to include it as soon as it's sent.
   await anvilClient.setAutomine(false);
   await resetToGenesis();
-  await setBlockGasLimit(1_000_000n);
+  await setBlockGasLimit();
   await etchSingletonFactory();
   await deployCallsLog();
 });
@@ -466,10 +511,6 @@ Deno.test({
     // just its latest one.
     const [{ hash: firstTxHash }] = await getTxpoolTxs();
     const firstTx = await anvilClient.getTransaction({ hash: firstTxHash });
-    assert(
-      firstTx.type === "eip1559" && firstTx.yParity !== undefined,
-      "Expected an EIP-1559 transaction",
-    );
     await dropPendingTxs();
 
     // The worker gives up waiting on the dropped TX after `inclusionWaitBlocks` and sends a
@@ -480,24 +521,87 @@ Deno.test({
 
     // The original TX is restored - despite the repriced retry being the worker's latest
     // attempt, this earlier one lands and mines instead.
-    // `serializeTransaction` expects `data`, but viem's parsed `Transaction` names the same
-    // field `input` - passing `firstTx` directly would silently serialize it as empty calldata.
-    await anvilClient.sendRawTransaction({
-      serializedTransaction: serializeTransaction({
-        type: "eip1559",
-        chainId,
-        nonce: firstTx.nonce,
-        to: firstTx.to,
-        value: firstTx.value,
-        data: firstTx.input,
-        gas: firstTx.gas,
-        maxFeePerGas: firstTx.maxFeePerGas,
-        maxPriorityFeePerGas: firstTx.maxPriorityFeePerGas,
-        accessList: firstTx.accessList,
-      }, { r: firstTx.r, s: firstTx.s, yParity: firstTx.yParity }),
-    });
+    await resubmitTx(firstTx);
     await mineNextTx();
 
+    await assertSequenceState(sequenceId, { successes: 1, failures: 0 });
+    await assertLogs(["ok"]);
+  },
+});
+
+Deno.test({
+  name: "send-sequences: a TX priced out by rising fees is repriced and mined",
+  timeout: 30_000,
+  async fn() {
+    const arg: SendSequencesArg = {
+      sequences: [{ chainId, bursts: [{ calls: [addLog("ok")] }] }],
+    };
+    const [sequenceId] = await sendSequences(arg);
+    await waitForTxpoolCounts(1);
+
+    const [{ hash: firstTxHash }] = await getTxpoolTxs();
+    const firstTx = await anvilClient.getTransaction({ hash: firstTxHash });
+
+    // The TX is left genuinely pending the whole time, the same as if real fees had simply risen
+    // past what it offered - unlike dropping it outright.
+    await mineEmptyBlocks(inclusionWaitBlocks);
+
+    // The worker gives up waiting on the original TX after `inclusionWaitBlocks` and sends a
+    // repriced retry at the same nonce - Anvil drops the original from the pool on its own once a
+    // valid, pricier replacement for the same nonce arrives, so the pool holds only the new one.
+    const secondTxHash = await waitForNewTxpoolTx(firstTxHash);
+    const secondTx = await anvilClient.getTransaction({ hash: secondTxHash });
+    await assertRepriced(firstTx, secondTx);
+
+    await mineNextTx();
+    await assertSequenceState(sequenceId, { successes: 1, failures: 0 });
+    await assertLogs(["ok"]);
+  },
+});
+
+Deno.test({
+  name: "send-sequences: repriced retries cap out at 1.5x, then the burst is skipped and resent",
+  timeout: 30_000,
+  async fn() {
+    const arg: SendSequencesArg = {
+      sequences: [{ chainId, bursts: [{ calls: [addLog("ok")] }] }],
+    };
+    const [sequenceId] = await sendSequences(arg);
+    await waitForTxpoolCounts(1);
+
+    let [{ hash: txHash }] = await getTxpoolTxs();
+    let tx = await anvilClient.getTransaction({ hash: txHash });
+
+    // Each repriced retry - whether resending the burst's own TX or, once that's been tried 3
+    // times, burning the nonce instead (see `sendTxAttempt`/`burnNonce`) - bumps the fee by at
+    // least `minGasIncreasePercent` over the last one actually sent. Compounded, that soon demands
+    // more than 1.5x the network's current fee estimate, which the worker refuses to pay - at that
+    // point it stops sending anything further, leaving the last attempt sitting pending.
+    let repriceCount = 0;
+    while (true) {
+      await mineEmptyBlocks(inclusionWaitBlocks);
+      const newTxHash = await deadline(waitForNewTxpoolTx(txHash), 1000)
+        .catch((error) => {
+          if (error instanceof DOMException && error.name === "TimeoutError") return undefined;
+          throw error;
+        });
+      if (!newTxHash) break;
+      const newTx = await anvilClient.getTransaction({ hash: newTxHash });
+      await assertRepriced(tx, newTx);
+      tx = newTx;
+      txHash = newTxHash;
+      repriceCount++;
+    }
+    assert(
+      repriceCount >= 2,
+      `Expected at least 2 repriced retries before capping, got ${repriceCount}`,
+    );
+
+    // The last (capped) attempt still gets mined normally, skipping the burst instead of failing
+    // it - then it's resent fresh, with a reset fee estimate, at the next nonce and succeeds.
+    await mineNextTx();
+    await assertSequenceState(sequenceId, { successes: 0, failures: 0, pending: 1 });
+    await mineNextTx();
     await assertSequenceState(sequenceId, { successes: 1, failures: 0 });
     await assertLogs(["ok"]);
   },
