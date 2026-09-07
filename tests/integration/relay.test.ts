@@ -1,6 +1,6 @@
 import { assert, assertEquals } from "@std/assert";
 import { deadline, delay } from "async";
-import { createWalletClient, http, publicActions, type Transaction } from "viem";
+import { createWalletClient, http, parseEther, publicActions, type Transaction } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import {
   assertSequenceState,
@@ -15,6 +15,7 @@ import {
 } from "./app.ts";
 import {
   anvilClient,
+  baseTxCost,
   dropPendingTxs,
   etchSingletonFactory,
   getTxpoolTxs,
@@ -580,7 +581,7 @@ Deno.test({
     let repriceCount = 0;
     while (true) {
       await mineEmptyBlocks(inclusionWaitBlocks);
-      const newTxHash = await deadline(waitForNewTxpoolTx(txHash), 1000)
+      const newTxHash = await deadline(waitForNewTxpoolTx(txHash), 500)
         .catch((error) => {
           if (error instanceof DOMException && error.name === "TimeoutError") return undefined;
           throw error;
@@ -674,6 +675,43 @@ Deno.test({
 });
 
 Deno.test({
+  name: "send-sequences: a nonce bumped directly (not via a real TX) also makes the app skip " +
+    "and resend",
+  timeout: 30_000,
+  async fn() {
+    const arg: SendSequencesArg = {
+      sequences: [{ chainId, bursts: [{ calls: [addLog("ok")] }] }],
+    };
+    const [sequenceId] = await sendSequences(arg);
+    await waitForTxpoolCounts(1);
+
+    const [{ hash: firstTxHash }] = await getTxpoolTxs();
+    const { nonce } = await anvilClient.getTransaction({ hash: firstTxHash });
+    await dropPendingTxs();
+
+    // Bumps the worker's nonce directly, via Anvil's own test API, rather than through any real
+    // TX - the app only ever observes the nonce being ahead of what it expects, regardless of
+    // whether that's from a competing TX or anything else.
+    const workerAddress = privateKeyToAccount(workerPrivateKey).address;
+    await anvilClient.setNonce({ address: workerAddress, nonce: nonce + 1 });
+
+    // Noticing the nonce skip, then sending, mining and confirming the resend all need further
+    // confirmations that can't be pinned to an exact block - each is mined with a short pause so
+    // the worker (a separate process) gets a chance to react before the next one lands, and the
+    // sequence's final state is polled for below rather than any one intermediate step. One more
+    // round than the dummy-TX version of this test, which gets the mining its own dummy TX needs
+    // as a head start for free - there's no such TX here to mine.
+    for (let i = 0; i < 6; i++) {
+      await delay(20);
+      await anvilClient.mine({ blocks: 1 });
+    }
+
+    await assertSequenceState(sequenceId, { successes: 1, failures: 0 });
+    await assertLogs(["ok"]);
+  },
+});
+
+Deno.test({
   name: "send-sequences: an early attempt is restored and mined after nonce burning starts",
   timeout: 30_000,
   async fn() {
@@ -753,6 +791,83 @@ Deno.test({
     // would have succeeded in isolation.
     await assertSequenceState(sequenceId, { successes: 1, failures: 2 });
     await assertLogs(["a"]);
+  },
+});
+
+Deno.test({
+  name: "send-sequences: insufficient funds for a heavy burst burns the nonce, " +
+    "then a fresh batch succeeds once funded",
+  timeout: 30_000,
+  async fn() {
+    const workerAddress = privateKeyToAccount(workerPrivateKey).address;
+    // Enough for the nonce-burning TX below, but nowhere near enough for the heavy burst's own.
+    await anvilClient.setBalance({ address: workerAddress, value: (await baseTxCost()) * 2n });
+
+    const arg: SendSequencesArg = {
+      sequences: [{
+        chainId,
+        bursts: [{ calls: [setGasPenalty("heavy", 500_000n), addLog("heavy")] }],
+      }],
+    };
+    const [sequenceId] = await sendSequences(arg);
+
+    // The burst's own TX can't be afforded, so the worker waits, then burns the nonce instead -
+    // affordable on its own - leaving the burst pending rather than failed.
+    await mineNextTx();
+    await assertSequenceState(sequenceId, { successes: 0, failures: 0, pending: 1 });
+
+    // Funded enough for the burst itself, so the fresh batch built for it succeeds normally.
+    await anvilClient.setBalance({ address: workerAddress, value: parseEther("1") });
+    await mineNextTx();
+    await assertSequenceState(sequenceId, { successes: 1, failures: 0 });
+    await assertLogs(["heavy"]);
+  },
+});
+
+Deno.test({
+  name: "send-sequences: insufficient funds even to burn the nonce waits, " +
+    "then a fresh batch succeeds once funded",
+  timeout: 30_000,
+  async fn() {
+    const workerAddress = privateKeyToAccount(workerPrivateKey).address;
+    // Not enough to afford even the nonce-burning TX, let alone the heavy burst.
+    await anvilClient.setBalance({ address: workerAddress, value: (await baseTxCost()) / 2n });
+
+    const arg: SendSequencesArg = {
+      sequences: [{
+        chainId,
+        bursts: [{ calls: [setGasPenalty("heavy", 500_000n), addLog("heavy")] }],
+      }],
+    };
+    const [sequenceId] = await sendSequences(arg);
+
+    // Neither the burst's own TX nor the much cheaper nonce-burning one can be afforded, so
+    // nothing ever reaches the mempool - the worker just keeps waiting for funds.
+    await deadline(waitForTxpoolCounts(1), 300).catch((error) => {
+      if (!(error instanceof DOMException && error.name === "TimeoutError")) throw error;
+    });
+    await waitForTxpoolCounts(0);
+
+    // Funded enough for the burst itself, and so, easily, the nonce-burning TX too.
+    await anvilClient.setBalance({ address: workerAddress, value: parseEther("1") });
+
+    // The failed nonce-burning attempt is only retried after `inclusionWaitBlocks` - unlike a
+    // dropped TX, nothing was ever actually sent for `waitForTxpoolCounts` to wait out, so those
+    // blocks need mining directly to get the retry going at all. A short pause first gives
+    // `watchTxs` a chance to grab the block number it'll wait `inclusionWaitBlocks` from, once the
+    // balance check above unblocks it - mining immediately risks it capturing a later block than
+    // intended, undercounting how many blocks are actually left to mine below.
+    await delay(50);
+    await anvilClient.mine({ blocks: inclusionWaitBlocks });
+
+    // The nonce-burning TX goes through this time, leaving the burst pending rather than failed.
+    await mineNextTx();
+    await assertSequenceState(sequenceId, { successes: 0, failures: 0, pending: 1 });
+
+    // The fresh batch built for it succeeds normally.
+    await mineNextTx();
+    await assertSequenceState(sequenceId, { successes: 1, failures: 0 });
+    await assertLogs(["heavy"]);
   },
 });
 

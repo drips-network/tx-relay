@@ -20,6 +20,7 @@ import {
   TransactionReceipt,
   TransactionReceiptNotFoundError,
 } from "viem";
+import { getNodeError } from "viem/utils";
 import { and, eq, inArray, min } from "drizzle-orm";
 import { type PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -651,7 +652,8 @@ async function sendTxRaw(retryTask: Task): Promise<Tasks> {
 
   try {
     await client.sendRawTransaction({ serializedTransaction: signedTx });
-  } catch (error) {
+  } catch (rawError) {
+    const error = rawError instanceof BaseError ? getNodeError(rawError, request) : rawError;
     if (matchViemError(error, ExecutionRevertedError)) return burnNonce;
     else if (matchViemError(error, FeeCapTooLowError)) return retryTask;
     else if (matchViemError(error, NonceTooLowError)) { /* Continue normally */ }
@@ -664,7 +666,7 @@ async function sendTxRaw(retryTask: Task): Promise<Tasks> {
       )
     ) {
       log("Replacement transaction", txHash, "underpriced"); // Continue normally
-    } else throw error;
+    } else throw rawError;
   }
   return () => watchTxs({ onPending: retryTask });
 }

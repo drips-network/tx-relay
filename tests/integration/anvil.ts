@@ -43,6 +43,16 @@ export async function etchSingletonFactory() {
   await anvilClient.setCode({ address: singletonFactory, bytecode: singletonFactoryBytecode });
 }
 
+// The cost of the cheapest possible TX at the current fee estimate - e.g. to fund a wallet with
+// just enough for a plain nonce-burning transfer, but not for whatever heavier TX it's replacing.
+export async function baseTxCost(): Promise<bigint> {
+  const { gas, maxFeePerGas } = await anvilClient.prepareTransactionRequest({
+    account: anvilClient.account,
+    to: anvilClient.account.address,
+  });
+  return gas * maxFeePerGas;
+}
+
 // Chain state, like any other set via a transaction, so - unlike automine - it's restored by
 // `evm_revert`/`anvil_snapshot` but wiped by `resetToGenesis`, which needs to reapply it.
 // Defaults to the value the test suite runs with, so callers that shrunk it can restore it with a
