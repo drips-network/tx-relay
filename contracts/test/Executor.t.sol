@@ -5,7 +5,7 @@ import {TestBase} from "forge-std/Base.sol";
 import {StdAssertions} from "forge-std/StdAssertions.sol";
 import {stdMath} from "forge-std/StdMath.sol";
 import {Vm} from "forge-std/Vm.sol";
-import {Executor} from "../src/Executor.sol";
+import {Burst, Call, DRAIN_GAS_WALLET, Executor} from "../src/Executor.sol";
 import {CallsLog} from "./CallsLog.sol";
 
 // Cheat code address, see `forge-std/Base.sol`'s `CommonBase` - duplicated here so the libraries
@@ -102,20 +102,20 @@ library GasReport {
 // A batch under construction for `Executor.exec`, carrying along its target `CallsLog` so it
 // doesn't need to be repeated on every `pushCallLog` call.
 struct BatchBuilder {
-    Executor.Burst[] bursts;
+    Burst[] bursts;
     CallsLog callsLog;
 }
 
 using BatchBuilderImpl for BatchBuilder global;
 
-// Incrementally builds a `BatchBuilder` - `Executor.Burst[] memory` has no `push`, so each call
-// here allocates a new, 1-larger array and copies the old one into it. E.g.:
+// Incrementally builds a `BatchBuilder` - `Burst[] memory` has no `push`, so each call here
+// allocates a new, 1-larger array and copies the old one into it. E.g.:
 //   BatchBuilder memory builder = BatchBuilderImpl.create(callsLog);
 //   builder = builder.pushBurst(false).pushCallLog("a").pushBurst(true).pushCallLog("b");
 library BatchBuilderImpl {
     // `new` is a reserved keyword in Solidity, so this can't be named that.
     function create(CallsLog callsLog) internal pure returns (BatchBuilder memory) {
-        return BatchBuilder({bursts: new Executor.Burst[](0), callsLog: callsLog});
+        return BatchBuilder({bursts: new Burst[](0), callsLog: callsLog});
     }
 
     function pushBurst(BatchBuilder memory builder, bool needsPrev)
@@ -131,12 +131,12 @@ library BatchBuilderImpl {
         pure
         returns (BatchBuilder memory)
     {
-        Executor.Burst[] memory newBursts = new Executor.Burst[](builder.bursts.length + 1);
+        Burst[] memory newBursts = new Burst[](builder.bursts.length + 1);
         for (uint256 i = 0; i < builder.bursts.length; i++) {
             newBursts[i] = builder.bursts[i];
         }
         newBursts[builder.bursts.length] =
-            Executor.Burst({needsPrev: needsPrev, gas: gas, calls: new Executor.Call[](0)});
+            Burst({needsPrev: needsPrev, gas: gas, calls: new Call[](0)});
         builder.bursts = newBursts;
         return builder;
     }
@@ -155,12 +155,12 @@ library BatchBuilderImpl {
         pure
         returns (BatchBuilder memory)
     {
-        Executor.Burst memory lastBurst = builder.bursts[builder.bursts.length - 1];
-        Executor.Call[] memory newCalls = new Executor.Call[](lastBurst.calls.length + 1);
+        Burst memory lastBurst = builder.bursts[builder.bursts.length - 1];
+        Call[] memory newCalls = new Call[](lastBurst.calls.length + 1);
         for (uint256 i = 0; i < lastBurst.calls.length; i++) {
             newCalls[i] = lastBurst.calls[i];
         }
-        newCalls[lastBurst.calls.length] = Executor.Call({
+        newCalls[lastBurst.calls.length] = Call({
             target: address(builder.callsLog),
             data: abi.encodeCall(builder.callsLog.addLog, (log)),
             gas: gas
@@ -230,20 +230,91 @@ contract ExecutorTest is TestBase, StdAssertions {
     }
 
     function testExecDoesNotRunBurstsWhenSenderIsDrainGas() public {
+        // Configured to revert if it ever actually ran, proving the drain-gas short-circuit in
+        // `execSingle` kicks in before a burst's calls are even attempted, not just before enough
+        // of them succeed to matter.
+        callsLog.setReverts("bad");
+
         BatchBuilder memory builder = BatchBuilderImpl.create(callsLog);
         builder = builder.pushBurst(false).pushCallLog("a");
         builder = builder.pushBurst(true).pushCallLog("b");
+        builder = builder.pushBurst(true).pushCallLog("bad");
 
         // `execSingle` burns all its gas and reverts immediately when `tx.origin` is this address
         // (see `Executor.sol`) - used by the relay to measure a batch's worst-case gas cost without
         // its calls' side effects actually landing.
-        address drainGas = address(bytes20("Executor - drain gas"));
-        vm.prank(address(this), drainGas);
+        vm.prank(address(this), DRAIN_GAS_WALLET);
         int256[] memory gasReport = executor.exec(builder.bursts);
 
         // Every burst is forced back to "success" regardless, so a real batch keeps being measured
         // in full, rather than stopping early as if the 1st burst had actually failed.
-        gasReport.expect().success().success().end();
+        gasReport.expect().success().success().success().end();
+        callsLog.getLogs().expect().end();
+    }
+
+    function testExecEnforcesACallsGasLimit() public {
+        // Far too little for `CallsLog.addLog` to even begin running - it runs out of gas and
+        // reverts, proving the call's own gas limit is actually forwarded to it, rather than being
+        // silently ignored or upgraded to however much gas happens to be available.
+        BatchBuilder memory builder = BatchBuilderImpl.create(callsLog);
+        builder = builder.pushBurst(false).pushCallLog("starved", 100);
+
+        int256[] memory gasReport = executor.exec(builder.bursts);
+
+        gasReport.expect().failure().end();
+        callsLog.getLogs().expect().end();
+    }
+
+    function testExecNextRunsPassedBurstsAndTheNextBurst() public {
+        BatchBuilder memory builder = BatchBuilderImpl.create(callsLog);
+        builder = builder.pushBurst(false).pushCallLog("a");
+        builder = builder.pushBurst(true).pushCallLog("b");
+
+        Call[] memory nextBurstCalls =
+        BatchBuilderImpl.create(callsLog).pushBurst(false).pushCallLog("c").bursts[0].calls;
+
+        // `burstsGas` only pads leftover gas before measuring the next burst's own needs, so it can
+        // just be 0 - that only skips the padding, it doesn't otherwise change what actually runs.
+        uint256 nextBurstGas = executor.execNext(builder.bursts, 0, nextBurstCalls);
+
+        assertGt(nextBurstGas, 0);
+        callsLog.getLogs().expect().log("a").log("b").log("c").end();
+    }
+
+    function testExecNextRevertsWhenBurstsHasAFailingCall() public {
+        callsLog.setReverts("bad");
+
+        BatchBuilder memory builder = BatchBuilderImpl.create(callsLog);
+        builder = builder.pushBurst(false).pushCallLog("bad");
+
+        Call[] memory nextBurstCalls =
+        BatchBuilderImpl.create(callsLog).pushBurst(false).pushCallLog("c").bursts[0].calls;
+
+        // `execNext` requires every burst in `bursts` to have succeeded - unlike `exec` on its own,
+        // it has no room for a partial failure, since there's no sequence state to fall back to
+        // pending here.
+        vm.expectRevert();
+        executor.execNext(builder.bursts, 0, nextBurstCalls);
+
+        // The whole call reverts atomically - `nextBurstCalls` never even gets a chance to run.
+        callsLog.getLogs().expect().end();
+    }
+
+    function testExecNextRevertsWhenNextBurstCallsHasAFailingCall() public {
+        callsLog.setReverts("bad");
+
+        BatchBuilder memory builder = BatchBuilderImpl.create(callsLog);
+        builder = builder.pushBurst(false).pushCallLog("a");
+
+        Call[] memory nextBurstCalls =
+        BatchBuilderImpl.create(callsLog).pushBurst(false).pushCallLog("bad").bursts[0].calls;
+
+        // `execSingle` is called directly (not via the low-level call `exec` uses internally), so a
+        // failing call in it reverts `execNext` as a whole, rather than being reported as a failure.
+        vm.expectRevert();
+        executor.execNext(builder.bursts, 0, nextBurstCalls);
+
+        // The whole call reverts atomically - not even `bursts`' own successful effect lands.
         callsLog.getLogs().expect().end();
     }
 }

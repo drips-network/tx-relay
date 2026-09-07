@@ -1,20 +1,23 @@
 // SPDX-License-Identifier: GPL-3.0-only
 pragma solidity ^0.8.35;
 
+struct Burst {
+    bool needsPrev;
+    uint256 gas;
+    Call[] calls;
+}
+
+struct Call {
+    address target;
+    bytes data;
+    uint256 gas;
+}
+
+// forge-lint: disable-next-line(unsafe-typecast)
+address constant DRAIN_GAS_WALLET = address(bytes20("Executor - drain gas"));
+
 contract Executor {
     event Receipt(int256[] gasReport);
-
-    struct Burst {
-        bool needsPrev;
-        uint256 gas;
-        Call[] calls;
-    }
-
-    struct Call {
-        address target;
-        bytes data;
-        uint256 gas;
-    }
 
     function exec(Burst[] calldata bursts) public returns (int256[] memory gasReport) {
         gasReport = new int256[](bursts.length + 1);
@@ -29,8 +32,8 @@ contract Executor {
             // forge-lint: disable-next-item(return-bomb, calls-loop, low-level-calls)
             (success,) =
                 address(this).call{gas: burst.gas}(abi.encodeCall(this.execSingle, (burst.calls)));
-            // forge-lint: disable-next-line(unsafe-typecast, tx-origin)
-            if (tx.origin == address(bytes20("Executor - drain gas"))) {
+            // forge-lint: disable-next-line(tx-origin)
+            if (tx.origin == DRAIN_GAS_WALLET) {
                 // forge-lint: disable-next-item(
                 //     require-revert-in-loop, literal-instead-of-constant, custom-errors)
                 // Assert that there was enough gas to cover the burst gas limit in full
@@ -66,8 +69,8 @@ contract Executor {
     }
 
     function execSingle(Call[] calldata calls) external {
-        // forge-lint: disable-next-line(unsafe-typecast, tx-origin)
-        if (tx.origin == address(bytes20("Executor - drain gas"))) {
+        // forge-lint: disable-next-line(tx-origin)
+        if (tx.origin == DRAIN_GAS_WALLET) {
             // Burn all available gas and revert
             while (true) continue;
         }
