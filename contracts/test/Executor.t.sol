@@ -186,13 +186,27 @@ contract ExecutorTest is TestBase, StdAssertions {
         callsLog = new CallsLog();
     }
 
+    // Calls `exec`, asserting that the `Receipt` event it emits matches the gas report it returns.
+    function execChecked(Burst[] memory bursts) private returns (int256[] memory gasReport) {
+        vm.recordLogs();
+        gasReport = executor.exec(bursts);
+
+        Vm.Log[] memory entries = vm.getRecordedLogs();
+        assertGe(entries.length, 1);
+        // `exec` emits it as the very last thing it does, so it's always the last entry.
+        Vm.Log memory receipt = entries[entries.length - 1];
+        assertEq(receipt.emitter, address(executor));
+        assertEq(receipt.topics[0], Executor.Receipt.selector);
+        assertEq(abi.decode(receipt.data, (int256[])), gasReport);
+    }
+
     function testExecRunsAllBurstsChecksReport() public {
         BatchBuilder memory builder = BatchBuilderImpl.create(callsLog);
         builder = builder.pushBurst(false).pushCallLog("a");
         builder = builder.pushBurst(true).pushCallLog("b1").pushCallLog("b2");
         builder = builder.pushBurst(true).pushCallLog("c1").pushCallLog("c2").pushCallLog("c3");
 
-        int256[] memory gasReport = executor.exec(builder.bursts);
+        int256[] memory gasReport = execChecked(builder.bursts);
 
         // 1 report entry before the 1st burst, plus 1 after each burst - all successes, each with
         // strictly less gas left than the one before.
@@ -216,7 +230,7 @@ contract ExecutorTest is TestBase, StdAssertions {
         // Runs normally - the previous burst succeeded, so this needs-prev burst isn't skipped.
         builder = builder.pushBurst(true).pushCallLog("d");
 
-        int256[] memory gasReport = executor.exec(builder.bursts);
+        int256[] memory gasReport = execChecked(builder.bursts);
 
         // Each entry reflects the outcome of whichever burst last actually ran before it - carried
         // forward unchanged across a skip, since skipping never updates the success flag. Gas is
@@ -244,7 +258,7 @@ contract ExecutorTest is TestBase, StdAssertions {
         // (see `Executor.sol`) - used by the relay to measure a batch's worst-case gas cost without
         // its calls' side effects actually landing.
         vm.prank(address(this), DRAIN_GAS_WALLET);
-        int256[] memory gasReport = executor.exec(builder.bursts);
+        int256[] memory gasReport = execChecked(builder.bursts);
 
         // Every burst is forced back to "success" regardless, so a real batch keeps being measured
         // in full, rather than stopping early as if the 1st burst had actually failed.
@@ -259,7 +273,7 @@ contract ExecutorTest is TestBase, StdAssertions {
         BatchBuilder memory builder = BatchBuilderImpl.create(callsLog);
         builder = builder.pushBurst(false).pushCallLog("starved", 100);
 
-        int256[] memory gasReport = executor.exec(builder.bursts);
+        int256[] memory gasReport = execChecked(builder.bursts);
 
         gasReport.expect().failure().end();
         callsLog.getLogs().expect().end();
@@ -311,6 +325,43 @@ contract ExecutorTest is TestBase, StdAssertions {
 
         // `execSingle` is called directly (not via the low-level call `exec` uses internally), so a
         // failing call in it reverts `execNext` as a whole, rather than being reported as a failure.
+        vm.expectRevert();
+        executor.execNext(builder.bursts, 0, nextBurstCalls);
+
+        // The whole call reverts atomically - not even `bursts`' own successful effect lands.
+        callsLog.getLogs().expect().end();
+    }
+
+    function testExecNextRevertsWhenABurstsCallRunsOutOfGas() public {
+        // Far too little for `CallsLog.addLog` to even begin running - it runs out of gas and
+        // reverts, causing `execNext`'s post-`exec` success check to fail the whole call, same as
+        // any other failing call in `bursts`.
+        BatchBuilder memory builder = BatchBuilderImpl.create(callsLog);
+        builder = builder.pushBurst(false).pushCallLog("starved", 100);
+
+        Call[] memory nextBurstCalls =
+        BatchBuilderImpl.create(callsLog).pushBurst(false).pushCallLog("c").bursts[0].calls;
+
+        vm.expectRevert();
+        executor.execNext(builder.bursts, 0, nextBurstCalls);
+
+        // The whole call reverts atomically - `nextBurstCalls` never even gets a chance to run.
+        callsLog.getLogs().expect().end();
+    }
+
+    function testExecNextRevertsWhenANextBurstCallRunsOutOfGas() public {
+        BatchBuilder memory builder = BatchBuilderImpl.create(callsLog);
+        builder = builder.pushBurst(false).pushCallLog("a");
+
+        // Far too little for `CallsLog.addLog` to even begin running - it runs out of gas and
+        // reverts, which reverts `execSingle` and, with it, the whole `execNext` call.
+        Call[] memory nextBurstCalls =
+        BatchBuilderImpl.create(callsLog)
+            .pushBurst(false)
+            .pushCallLog("starved", 100)
+            .bursts[0]
+            .calls;
+
         vm.expectRevert();
         executor.execNext(builder.bursts, 0, nextBurstCalls);
 
