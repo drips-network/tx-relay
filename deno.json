@@ -1,5 +1,6 @@
 {
   "license": "GPL-3.0-only",
+  "exclude": ["contracts"],
   "tasks": {
     "start": "deno run --allow-read=drizzle --allow-net --allow-sys=uid,gid,userInfo --allow-env --env-file src/main.ts",
     "start-dev": "deno task --env-file start",
@@ -20,6 +21,20 @@
     "zod": "jsr:@zod/zod@^4.3.6"
   },
   "fmt": {
-    "lineWidth": 100
+    "lineWidth": 100,
+    "include": [
+      "src",
+      "tests",
+      "deno.json",
+      "drizzle.config.ts"
+    ]
+  },
+  "lint": {
+    "include": [
+      "src",
+      "tests",
+      "deno.json",
+      "drizzle.config.ts"
+    ]
   }
 }
