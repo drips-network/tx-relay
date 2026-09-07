@@ -1,21 +1,21 @@
 // SPDX-License-Identifier: GPL-3.0-only
 pragma solidity ^0.8.35;
 
-event Receipt(int256[] gasReport);
-
-struct Burst {
-    bool needsPrev;
-    uint256 gas;
-    Call[] calls;
-}
-
-struct Call {
-    address target;
-    bytes data;
-    uint256 gas;
-}
-
 contract Executor {
+    event Receipt(int256[] gasReport);
+
+    struct Burst {
+        bool needsPrev;
+        uint256 gas;
+        Call[] calls;
+    }
+
+    struct Call {
+        address target;
+        bytes data;
+        uint256 gas;
+    }
+
     function exec(Burst[] calldata bursts) public returns (int256[] memory gasReport) {
         gasReport = new int256[](bursts.length + 1);
         bool success = true;
