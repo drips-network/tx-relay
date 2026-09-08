@@ -1,0 +1,167 @@
+import { sql } from "drizzle-orm";
+import {
+  customType,
+  index,
+  integer,
+  jsonb,
+  numeric,
+  pgEnum,
+  pgTable,
+  timestamp,
+  unique,
+  uuid,
+} from "drizzle-orm/pg-core";
+import { type Address, bytesToHex, getAddress, type Hex, hexToBytes } from "viem";
+import { z } from "zod";
+
+const bytea = customType<{ data: Hex; driverData: Uint8Array }>({
+  dataType: () => "bytea",
+  toDriver: hexToBytes,
+  fromDriver: bytesToHex,
+});
+
+const address = customType<{ data: Address; driverData: Uint8Array }>({
+  dataType: () => "bytea",
+  toDriver: (address) => hexToBytes(getAddress(address)),
+  fromDriver: (bytes) => getAddress(bytesToHex(bytes)),
+});
+
+const uint256 = () => numeric({ precision: 78, scale: 0, mode: "bigint" });
+
+// Inserted when a sequence is queued for execution.
+export const sequencesTable = pgTable("sequences", {
+  id: uuid().primaryKey().default(sql`uuidv7()`),
+  chainId: integer().notNull(),
+});
+
+export const burstStateEnum = pgEnum("burst_state", ["pending", "success", "failure"]);
+
+// Inserted when a sequence is queued for execution. 1 row per burst in a sequence.
+export const burstsTable = pgTable("bursts", {
+  id: integer().primaryKey().generatedAlwaysAsIdentity(),
+  sequenceId: uuid().notNull().references(() => sequencesTable.id),
+  idxInSequence: integer().notNull(),
+  gasBufferPercent: integer(),
+  state: burstStateEnum().notNull().default("pending"),
+}, (table) => [
+  index("bursts_sequence_id_idx").on(table.sequenceId),
+  index("bursts_state_idx").on(table.state).where(sql`${table.state} = 'pending'`),
+]);
+
+// Inserted when a sequence is queued for execution. 1 row per call in a burst.
+export const callsTable = pgTable("calls", {
+  id: integer().primaryKey().generatedAlwaysAsIdentity(),
+  burstId: integer().notNull().references(() => burstsTable.id),
+  target: address().notNull(),
+  calldata: bytea().notNull(),
+  gas: uint256(),
+}, (table) => [index("calls_burst_ids_idx").on(table.burstId)]);
+
+export const sequenceEventKindEnum = pgEnum("event_kind", [
+  "created",
+  "rejected",
+  "submitted",
+  "executed",
+  "skipped",
+]);
+
+// Inserted when a sequence event occurs.
+export const sequenceEventsTable = pgTable("sequence_events", {
+  id: integer().primaryKey().generatedAlwaysAsIdentity(),
+  sequenceId: uuid().notNull().references(() => sequencesTable.id),
+  timestamp: timestamp({ withTimezone: true }).notNull().defaultNow(),
+  kind: sequenceEventKindEnum().notNull(),
+  details: jsonb().notNull(),
+}, (table) => [index("sequence_events_sequence_id_idx").on(table.sequenceId)]);
+
+const sequenceEventCreatedSchema = z.object({
+  kind: z.literal("created"),
+  details: z.object({ burstsCount: z.number() }),
+});
+
+const sequenceEventRejectedSchema = z.object({
+  kind: z.literal("rejected"),
+  details: z.object({ fromIdxInSequence: z.number() }),
+});
+
+const sequenceEventSubmittedSchema = z.object({
+  kind: z.literal("submitted"),
+  details: z.object({ fromIdxInSequence: z.number(), burstsCount: z.number() }),
+});
+
+const sequenceEventExecutedSchema = z.object({
+  kind: z.literal("executed"),
+  details: z.object({ fromIdxInSequence: z.number(), successes: z.number(), failed: z.boolean() }),
+});
+
+const sequenceEventSkippedSchema = z.object({
+  kind: z.literal("skipped"),
+  details: z.object({}),
+});
+
+export const sequenceEventSchema = z.discriminatedUnion("kind", [
+  sequenceEventCreatedSchema,
+  sequenceEventRejectedSchema,
+  sequenceEventSubmittedSchema,
+  sequenceEventExecutedSchema,
+  sequenceEventSkippedSchema,
+]);
+
+export type SequenceEvent = z.infer<typeof sequenceEventSchema>;
+export type SequenceEventKindEnum = (typeof sequenceEventKindEnum.enumValues)[number];
+
+export function sequenceEventToDbValue(
+  sequenceId: string,
+  { kind, details }: SequenceEvent,
+): { sequenceId: string; kind: SequenceEventKindEnum; details: unknown } {
+  return { sequenceId, kind, details };
+}
+
+export function dbValueToSequenceEvent(
+  kind: SequenceEventKindEnum,
+  details: unknown,
+): SequenceEvent {
+  return sequenceEventSchema.parse({ kind, details });
+}
+
+// Inserted when a new transaction sender is prepared to send its first transaction.
+// The sender is considered new when it uses a previously unused nonce on the given chain.
+export const txSendersTable = pgTable(
+  "tx_senders",
+  {
+    id: integer().primaryKey().generatedAlwaysAsIdentity(),
+    address: address().notNull(),
+    nonce: integer().notNull(),
+    chainId: integer().notNull(),
+  },
+  (table) => [unique().on(table.address, table.nonce, table.chainId)],
+);
+
+export const txStateEnum = pgEnum("tx_state", ["pending", "success", "reverted", "skipped"]);
+
+// Inserted when a signed transaction is published.
+export const txsTable = pgTable("txs", {
+  id: integer().primaryKey().generatedAlwaysAsIdentity(),
+  txHash: bytea().notNull().unique(),
+  txPayloadId: integer().notNull().references(() => txPayloadsTable.id),
+  state: txStateEnum().notNull().default("pending"),
+}, (table) => [
+  index("txs_state_idx").on(table.state).where(sql`${table.state} = 'pending'`),
+]);
+
+// Inserted when a new payload for transactions is created.
+export const txPayloadsTable = pgTable("tx_payloads", {
+  id: integer().primaryKey().generatedAlwaysAsIdentity(),
+  txSenderId: integer().notNull().references(() => txSendersTable.id),
+  target: address().notNull(),
+  calldata: bytea().notNull().default("0x"),
+  gas: uint256(),
+}, (table) => [index("tx_payloads_tx_sender_id_idx").on(table.txSenderId)]);
+
+// Inserted when a batch is created, 1 row per burst in a batch.
+export const txPayloadBurstsTable = pgTable("tx_payload_bursts", {
+  id: integer().primaryKey().generatedAlwaysAsIdentity(),
+  txPayloadId: integer().notNull().references(() => txPayloadsTable.id),
+  burstId: integer().notNull().references(() => burstsTable.id),
+  inclusionGas: uint256().notNull(),
+}, (table) => [index("tx_payload_bursts_tx_payload_id_idx").on(table.txPayloadId)]);
