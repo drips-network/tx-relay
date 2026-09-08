@@ -110,6 +110,11 @@ Deno.test.beforeAll(async () => {
 
 Deno.test.beforeEach(async () => {
   await resetDb();
+  // `evm_revert` restores chain state (balances, nonces, storage) but not the mempool, which is
+  // node-level rather than chain state - a TX a previous test left unmined (e.g. because it
+  // failed/timed out before its own cleanup ran) would otherwise survive into this test's
+  // snapshot, and, its nonce now stale against the reverted state, show up as bogus "queued".
+  await dropPendingTxs();
   if (checkpointId) await anvilClient.revert({ id: checkpointId });
   checkpointId = await anvilClient.snapshot();
 
