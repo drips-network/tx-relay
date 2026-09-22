@@ -1,6 +1,5 @@
 import { Application, Context, Router } from "oak";
 import { z } from "zod";
-import { Address, Hex, isAddress, isHex } from "viem";
 import { eq, inArray, sql } from "drizzle-orm";
 import { type PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import {
@@ -11,7 +10,9 @@ import {
   sequenceEventsTable,
   sequenceEventToDbValue,
   sequencesTable,
-} from "./db/schema.ts";
+  zodAddress,
+  zodHex,
+} from "./db-schema.ts";
 import { WorkerHealth } from "./worker.ts";
 
 export const healthSchema = z.object({
@@ -29,8 +30,8 @@ export const sendSequencesArgSchema = z.object({
     bursts: z.array(z.object({
       gasBufferPercent: z.number().int().nonnegative().optional(),
       calls: z.array(z.object({
-        target: z.custom<Address>().refine(isAddress, "Not an address"),
-        calldata: z.custom<Hex>().refine((s) => isHex(s) && s.length % 2 == 0, "Not a hex value"),
+        target: zodAddress,
+        calldata: zodHex,
         gas: z.number().int().positive().optional(),
       })).nonempty(),
     })).nonempty(),

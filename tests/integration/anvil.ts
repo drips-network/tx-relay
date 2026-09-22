@@ -73,16 +73,12 @@ export async function mineEmptyBlocks(blocks: number) {
   await setBlockGasLimit();
 }
 
-// Every transaction currently pending or queued in the mempool, in full (not just their count
-// or hash), so callers can e.g. resubmit one verbatim after it's been dropped.
 export async function getTxpoolTxs() {
   const content = await anvilClient.getTxpoolContent();
   return [...Object.values(content.pending), ...Object.values(content.queued)]
     .flatMap((byNonce) => Object.values(byNonce));
 }
 
-// Drops every pending and queued transaction from the mempool, so none of them can ever be
-// mined - e.g. to simulate one being lost/abandoned rather than merely taking a while.
 export async function dropPendingTxs() {
   const txs = await getTxpoolTxs();
   for (const { hash } of txs) {
@@ -107,8 +103,29 @@ export async function waitForTxpoolCounts(pending: number, queued = 0) {
   }
 }
 
-// Polls the mempool until its single pending transaction is no longer the one with the given
-// hash, returning the new one's hash - e.g. to observe a repriced replacement land.
+// Requires automine off. Waits for exactly one pending TX and none queued, then mines it plus
+// `confirmations` confirmation blocks, returning its hash and landing block.
+//
+// Mined one block at a time, with a real pause after each, rather than in one batched
+// `anvil_mine({blocks: N})` call: that commits all N blocks essentially atomically, with no gap
+// for the worker's own polling (see `watchTxs` in worker.ts) to observe a TX's receipt before
+// re-checking whether `inclusionWaitBlocks` have passed with none seen - which can spuriously
+// cross that resend threshold in the same instant the TX is actually included, triggering an
+// unwanted reprice/resend. The per-block pause keeps that gap real, so the receipt is always seen
+// first.
+export async function mineNextTx(
+  confirmations: number,
+): Promise<{ txHash: Hex; blockNumber: bigint }> {
+  await waitForTxpoolCounts(1);
+  const [{ hash: txHash }] = await getTxpoolTxs();
+  for (let i = 0; i < 1 + 2 * confirmations; i++) {
+    await anvilClient.mine({ blocks: 1 });
+    await delay(20);
+  }
+  const { blockNumber } = await anvilClient.getTransactionReceipt({ hash: txHash });
+  return { txHash, blockNumber };
+}
+
 export async function waitForNewTxpoolTx(previousHash: Hex): Promise<Hex> {
   while (true) {
     const [tx] = await getTxpoolTxs();

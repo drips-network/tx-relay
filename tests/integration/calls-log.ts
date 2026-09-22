@@ -15,7 +15,7 @@ function getCallsLogAddress(): Address {
 export async function deployCallsLog(): Promise<Address> {
   const hash = await anvilClient.deployContract({ abi: callsLogAbi, bytecode: callsLogBytecode });
   await anvilClient.mine({ blocks: 1 });
-  const receipt = await anvilClient.waitForTransactionReceipt({ hash });
+  const receipt = await anvilClient.getTransactionReceipt({ hash });
   assert(receipt.contractAddress, "CallsLog deployment failed");
   callsLogAddress = receipt.contractAddress;
   return callsLogAddress;
@@ -63,4 +63,13 @@ export function setGasPenalty(log: string, gas: bigint): Call {
       args: [log, gas],
     }),
   };
+}
+
+// Calls the CallsLog fixture's `setGasPenalty(value, gas)` directly from the maintenance wallet
+// and mines it - for test setup that doesn't need to go through send-sequences/the app at all.
+export async function setGasPenaltyDirectly(log: string, gas: bigint) {
+  const { target, calldata } = setGasPenalty(log, gas);
+  const hash = await anvilClient.sendTransaction({ to: target, data: calldata });
+  await anvilClient.mine({ blocks: 1 });
+  await anvilClient.getTransactionReceipt({ hash });
 }

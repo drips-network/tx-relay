@@ -57,10 +57,6 @@ jobs:
             git diff -- drizzle
             exit 1
           fi
-      # Compares only the compiled bytecode (see `trimMetadata` in generate-contracts.ts) rather
-      # than diffing the generated files outright, since Solidity's metadata trailer embeds a
-      # hash covering absolute source paths and differs between machines/Foundry versions even
-      # when the contract itself hasn't changed.
       - name: Verify generated contract bindings are up to date
         run: deno task contracts-generate-check
 
@@ -73,6 +69,6 @@ jobs:
         with:
           deno-version: v2.x
       - name: Start Postgres and Anvil
-        run: docker compose up -d --wait
+        run: docker compose -f docker-compose.dev.yml up -d --wait
       - name: Run integration tests
         run: deno task test-integration

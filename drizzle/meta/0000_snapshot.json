@@ -1,5 +1,5 @@
 {
-  "id": "4a79efd8-fabb-4706-8e52-880b853cc992",
+  "id": "383aea07-5688-45da-927f-4529f44ad923",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -430,14 +430,13 @@
           "name": "calldata",
           "type": "bytea",
           "primaryKey": false,
-          "notNull": true,
-          "default": "'0x'"
+          "notNull": true
         },
         "gas": {
           "name": "gas",
           "type": "numeric(78, 0)",
           "primaryKey": false,
-          "notNull": false
+          "notNull": true
         }
       },
       "indexes": {

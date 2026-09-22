@@ -21,7 +21,7 @@ const configSchema = z.object({
     chains: z.array(z.object({
       chainId: z.number().int().positive(),
       rpcUrls: z.array(z.url()).default([]),
-      confirmations: z.number().int().positive().optional(),
+      confirmations: z.number().int().nonnegative().optional(),
       minGasIncreasePercent: z.number().int().nonnegative().optional(),
       inclusionWaitBlocks: z.number().int().positive().optional(),
     })).nonempty(),

@@ -11,8 +11,11 @@ import {
   unique,
   uuid,
 } from "drizzle-orm/pg-core";
-import { type Address, bytesToHex, getAddress, type Hex, hexToBytes } from "viem";
+import { type Address, bytesToHex, getAddress, type Hex, hexToBytes, isAddress, isHex } from "viem";
 import { z } from "zod";
+
+export const zodAddress = z.custom<Address>().refine(isAddress, "Not an address");
+export const zodHex = z.custom<Hex>().refine((s) => isHex(s) && s.length % 2 == 0, "Not a hex");
 
 const bytea = customType<{ data: Hex; driverData: Uint8Array }>({
   dataType: () => "bytea",
@@ -86,17 +89,19 @@ const sequenceEventRejectedSchema = z.object({
 
 const sequenceEventSubmittedSchema = z.object({
   kind: z.literal("submitted"),
-  details: z.object({ fromIdxInSequence: z.number(), burstsCount: z.number() }),
+  details: z.object({ txHash: zodHex, fromIdxInSequence: z.number(), burstsCount: z.number() }),
 });
 
 const sequenceEventExecutedSchema = z.object({
   kind: z.literal("executed"),
-  details: z.object({ fromIdxInSequence: z.number(), successes: z.number(), failed: z.boolean() }),
+  details: z.object(
+    { txHash: zodHex, fromIdxInSequence: z.number(), successes: z.number(), failed: z.boolean() },
+  ),
 });
 
 const sequenceEventSkippedSchema = z.object({
   kind: z.literal("skipped"),
-  details: z.object({}),
+  details: z.object({ txHash: zodHex }),
 });
 
 export const sequenceEventSchema = z.discriminatedUnion("kind", [
@@ -154,8 +159,8 @@ export const txPayloadsTable = pgTable("tx_payloads", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
   txSenderId: integer().notNull().references(() => txSendersTable.id),
   target: address().notNull(),
-  calldata: bytea().notNull().default("0x"),
-  gas: uint256(),
+  calldata: bytea().notNull(),
+  gas: uint256().notNull(),
 }, (table) => [index("tx_payloads_tx_sender_id_idx").on(table.txSenderId)]);
 
 // Inserted when a batch is created, 1 row per burst in a batch.

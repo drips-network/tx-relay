@@ -1,0 +1,48 @@
+include:
+  - docker-compose.dev.yml
+services:
+  pgadmin:
+    image: docker.io/dpage/pgadmin4:9.18.0
+    restart: always
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: password
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
+      PGADMIN_SERVER_JSON_FILE: /tmp/servers.json
+      PGADMIN_REPLACE_SERVERS_ON_STARTUP: "True"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        POSTGRES_DB=tx_relay
+        POSTGRES_USER=user
+        POSTGRES_PASSWORD=password
+        PGPASS_FILE=/tmp/pgpass
+        cat <<EOF > "$$PGADMIN_SERVER_JSON_FILE"
+        {
+          "Servers": {
+            "1": {
+              "Name": "$$POSTGRES_DB",
+              "Group": "Servers",
+              "Host": "db",
+              "Port": 5432,
+              "MaintenanceDB": "$$POSTGRES_DB",
+              "Username": "$$POSTGRES_USER",
+              "SSLMode": "prefer",
+              "PassFile": "$$PGPASS_FILE"
+            }
+          }
+        }
+        EOF
+        printf '%s\n' "*:*:$$POSTGRES_DB:$$POSTGRES_USER:$$POSTGRES_PASSWORD" > "$$PGPASS_FILE"
+        chmod 600 "$$PGPASS_FILE"
+        exec /entrypoint.sh
+    ports: ["5050:80"]
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      db:
+        condition: service_healthy
+volumes:
+  pgadmin_data:

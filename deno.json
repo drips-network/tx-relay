@@ -2,13 +2,15 @@
   "license": "GPL-3.0-only",
   "exclude": ["contracts"],
   "tasks": {
-    "start": "deno run --allow-read=drizzle --allow-net --allow-sys=uid,gid,userInfo --allow-env --env-file src/main.ts",
+    "start": "deno run --allow-read=drizzle --allow-net --allow-sys=uid,gid,userInfo --allow-env src/main.ts",
     "start-dev": "deno task --env-file start",
+    "dev-services-start": "docker compose -f docker-compose.local.yml up --detach",
+    "dev-services-stop": "docker compose -f docker-compose.local.yml down",
+    "test-integration": "deno test --allow-run=deno --allow-net --allow-env tests/integration",
     "contracts-generate": "deno run --allow-read=contracts,src --allow-write=src,tests --allow-run=forge,deno src/generate-contracts.ts",
     "contracts-generate-check": "deno run --allow-read=contracts,src,tests --allow-run=forge src/generate-contracts.ts --check",
-    "drizzle-kit": "deno run --allow-write=drizzle --allow-net --allow-sys=homedir --allow-env --env-file --allow-read npm:drizzle-kit",
-    "drizzle-generate": "deno task drizzle-kit generate",
-    "test-integration": "deno test --allow-run=deno --allow-net --allow-env tests/integration"
+    "drizzle-kit": "deno run --allow-write=drizzle --allow-net --allow-sys=homedir --allow-env --env-file --allow-read npm:drizzle-kit --config=src/drizzle.config.ts",
+    "drizzle-generate": "deno task drizzle-kit generate"
   },
   "imports": {
     "drizzle-kit": "npm:drizzle-kit@^0.31.10",

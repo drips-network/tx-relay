@@ -9,7 +9,7 @@ import {
   type SequencesStatesArg,
   sequencesStatesSchema,
 } from "../../src/app.ts";
-import { type SequenceEvent } from "../../src/db/schema.ts";
+import { type SequenceEvent } from "../../src/db-schema.ts";
 
 // Anvil's default account #0, pre-funded with test ETH. This is the wallet the app's own
 // worker uses to send transactions - tests must never use it for their own on-chain setup
@@ -99,6 +99,27 @@ export async function sendSequences(arg: SendSequencesArg): Promise<string[]> {
   return sequences.map(({ id }) => id);
 }
 
+async function getSequenceState(id: string) {
+  const arg: SequencesStatesArg = { sequences: [{ id }] };
+  const response = await fetch(`http://localhost:${port}/sequences-states`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(arg),
+  });
+  assert(response.ok, `/sequences-states returned ${response.status}`);
+  const { sequences: [state] } = sequencesStatesSchema.parse(await response.json());
+  return state;
+}
+
+// Fetches a sequence's current events - for reading back details (e.g. a `skipped` event's
+// `txHash`) that aren't otherwise observable from the test, such as a TX that never made it to
+// the mempool at all (e.g. rejected for insufficient funds before broadcast).
+export async function getSequenceEvents(
+  id: string,
+): Promise<(SequenceEvent & { timestamp: Date })[]> {
+  return (await getSequenceState(id)).events;
+}
+
 // Polls a sequence's state until it holds exactly the expected successes, failures and pending
 // counts. Throws immediately if successes or failures overshoot, or pending undershoots, since
 // that means the sequence resolved differently than expected rather than just not being there
@@ -115,14 +136,7 @@ export async function assertSequenceState(
 ) {
   const { successes, failures, pending = 0 } = expectedState;
   while (true) {
-    const arg: SequencesStatesArg = { sequences: [{ id }] };
-    const response = await fetch(`http://localhost:${port}/sequences-states`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(arg),
-    });
-    assert(response.ok, `/sequences-states returned ${response.status}`);
-    const { sequences: [state] } = sequencesStatesSchema.parse(await response.json());
+    const state = await getSequenceState(id);
     if (state.successes === successes && state.failures === failures && state.pending === pending) {
       if (events) assertEvents(state.events, events);
       return;
